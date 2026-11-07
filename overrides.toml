@@ -31,6 +31,13 @@ vendor = ["python"]
 product = ["node.js"]
 vendor = ["nodejs"]
 
+["nodejs-slim"]
+# Same interpreter built without npm/ICU; same NVD product. Without this entry
+# the pname "nodejs-slim" looks for a "nodejs-slim" product, which does not
+# exist, so an affected slim node was silently skipped.
+product = ["node.js"]
+vendor = ["nodejs"]
+
 ["libtheora"]
 # Verified: product "theora" is libtheora ("oc_huff_tree_unpack ... in libtheora
 # in Theora"), vendor xiph.

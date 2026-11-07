@@ -523,6 +523,8 @@ class OverridesTest(DatabaseTest):
         entries = overrides.load()
         self.assertIn("git-scm", overrides.vendors_for(entries, "git"))
         self.assertEqual(overrides.products_for(entries, "python3"), ["python"])
+        # Variant pnames of the same upstream project need their own entry.
+        self.assertEqual(overrides.products_for(entries, "nodejs-slim"), ["node.js"])
         # Nothing is constrained for a package we have no opinion about.
         self.assertIsNone(overrides.vendors_for(entries, "wget"))
         self.assertEqual(overrides.products_for(entries, "wget"), [])
