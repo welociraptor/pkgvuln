@@ -1,0 +1,75 @@
+# pkgvuln whitelist: findings that are real to the matcher but not real bugs
+# here. Every entry is pinned to a package version, so it stops applying by
+# itself after an upgrade - that is the intended lifecycle, no `until` needed.
+#
+#   ["pkg-version"]        or ["pkg"]  or ["*"]
+#   cve = ["CVE-...", ...]  mask only these; a NEW cve on the same version
+#                          reappears (that is the point of listing them)
+#   issue_url = "..."      where the triage was recorded
+#   comment = "..."        why this is not a finding
+#
+# Use a rule without `cve` only when the whole package is out of scope.
+
+# --- NVD range data is wrong for these --------------------------------------
+
+["perl-5.42.3"]
+cve = ["CVE-2026-8376", "CVE-2026-13221", "CVE-2026-57432"]
+comment = """NVD collapsed three perl branches into a single CPE range with no
+lower bound (`end_excl 5.43.10`), so every perl is reported. The descriptions
+state the fixes as 5.40.5-RC1, 5.42.3-RC1 and 5.43.11 - and 5.42.3 is exactly
+the fixed version for this branch."""
+
+["perl-5.42.3-env"]
+cve = ["CVE-2026-8376", "CVE-2026-13221", "CVE-2026-57432"]
+comment = "Same derivation as perl-5.42.3, recorded under its env output."
+
+["glibc-2.44-57"]
+cve = ["CVE-2026-6238"]
+comment = """The CPE row has `start_incl 2.2` and no end bound, while the
+description says "to version 2.43". 2.44 is newer than the fix."""
+
+["dbus-1"]
+cve = ["CVE-2022-42010", "CVE-2022-42011", "CVE-2022-42012"]
+comment = """The derivation is named dbus-1 and track-packages split that into
+pname=dbus version=1, so every "before 1.12.24" range matches. The installed
+dbus is 1.16.x."""
+
+["avahi-0.8"]
+cve = ["CVE-2021-26720"]
+comment = """Debian packaging bug: avahi-daemon-check-dns.sh from the Debian
+package, which NixOS does not ship. Not upstream avahi."""
+
+# --- the advisory does not describe this code -------------------------------
+
+["game-music-emu-0.6.5"]
+cve = ["CVE-2026-0016", "CVE-2026-0017", "CVE-2026-0018"]
+comment = """NVD files these under product game_music_emu / vendor libgme, but
+the text describes Android's BiometricService.java (fingerprint unlock). No
+vendor constraint can express this, so it is whitelisted instead."""
+
+# --- Windows-only advisories ------------------------------------------------
+
+["python3.14-mako-1.4.1"]
+cve = ["GHSA-5639-2j2p-m4mx", "PYSEC-2026-4243"]
+comment = """TemplateLookup with a Windows drive designator; Linux cannot hit
+it. Two OSV ids for one bug."""
+
+["python3.14-setuptools-83.0.0"]
+cve = ["GHSA-xmj3-9gf7-h52w"]
+comment = "namespace_packages.txt handling, Windows-only."
+
+# --- CPE bounds expressed as dates -----------------------------------------
+
+["ffmpeg-9.0.2"]
+cve = ["CVE-2025-25468", "CVE-2025-25469"]
+comment = """Bound is a git commit date (2025-01-13), compared against
+version 9.0.2. Both are git-master-only leaks fixed before this release."""
+
+["gcc-16.2.0"]
+cve = ["CVE-2023-4039"]
+comment = """Date-bounded (-fstack-protector on aarch64). Not applicable on
+x86_64 and fixed long before GCC 16."""
+
+["ada-4.0.0"]
+cve = ["CVE-2024-9410"]
+comment = "Date-bounded CPE (2024-10-01); the fix predates ada 4.0.0."
