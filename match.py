@@ -17,28 +17,35 @@ Known limitations, inherited from the way NVD models software:
 
 Product candidates are tried in order of decreasing confidence, straight from
 ``Derive.product_candidates()`` in vulnix, which is the de-facto convention for
-this problem.
+this problem. Curated entries from :mod:`pkgvuln.overrides` are tried first and
+can also restrict the accepted vendor, which is what removes the false
+positives caused by NVD reusing a product name for an unrelated project.
 """
 
 from __future__ import annotations
 
 import logging
 
-from . import db, nixver
+from . import db, nixver, overrides as overrides_module
 
 SOURCE = "nvd"
 
 
-def product_candidates(pname: str) -> list[str]:
+def product_candidates(pname: str, curated=()) -> list[str]:
     """Candidate NVD product names, most literal first.
 
     ``affected.product`` is stored lowercased at ingest time, so case variants
     would be redundant lookups; only the hyphen/underscore difference is real
     (NVD has both ``libpng`` and ``libpng16``, and ``gnu_libc``-style names).
+    Curated names from the override file are tried before the heuristic ones.
     """
     underscore = pname.replace("-", "_").lower()
     literal = pname.lower()
-    return [literal] if literal == underscore else [literal, underscore]
+    candidates = [name.lower() for name in curated]
+    for name in (literal, underscore):
+        if name not in candidates:
+            candidates.append(name)
+    return candidates
 
 
 def _row_matches(row, release: str) -> bool:
@@ -59,24 +66,28 @@ def _row_matches(row, release: str) -> bool:
     )
 
 
-def candidates_for(connection, release: str, pname: str):
+def candidates_for(connection, release: str, pname: str, entries=None):
     """Yield (product, advisory_id) pairs for one package."""
+    entries = entries or {}
+    curated = overrides_module.products_for(entries, pname)
+    allowed_vendors = overrides_module.vendors_for(entries, pname)
     statement = (
-        "SELECT advisory_id, version_exact, start_incl, start_excl,"
+        "SELECT advisory_id, vendor, version_exact, start_incl, start_excl,"
         " end_incl, end_excl FROM affected WHERE product = ?"
     )
-    for product in product_candidates(pname):
+    for product in product_candidates(pname, curated):
         hits = [
             row["advisory_id"]
-            for row in connection.execute(statement, (product.lower(),))
-            if _row_matches(row, release)
+            for row in connection.execute(statement, (product,))
+            if (allowed_vendors is None or (row["vendor"] or "") in allowed_vendors)
+            and _row_matches(row, release)
         ]
         if hits:
             yield product, sorted(set(hits))
             return
 
 
-def scan(connection, snapshot_id: int, packages: list) -> int:
+def scan(connection, snapshot_id: int, packages: list, entries=None) -> int:
     """Record matches for every package whose name/version hits the CPE data."""
     log = logging.getLogger(__name__)
     affected = connection.execute("SELECT COUNT(*) AS n FROM affected").fetchone()["n"]
@@ -100,7 +111,9 @@ def scan(connection, snapshot_id: int, packages: list) -> int:
             unmatched_reason["no_version"] += 1
             continue
         found = False
-        for product, advisory_ids in candidates_for(connection, release, package["name"]):
+        for product, advisory_ids in candidates_for(
+            connection, release, package["name"], entries
+        ):
             found = True
             for advisory_id in advisory_ids:
                 db.record_match(

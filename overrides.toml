@@ -1,0 +1,99 @@
+# pkgvuln overrides: curated facts about how Nix packages map onto NVD/CPE.
+#
+#   ["<nix pname>"]
+#   product = ["<nvd product>", ...]  # tried before the name heuristics
+#   vendor  = ["<nvd vendor>", ...]   # if set, only these vendors may match
+#
+# Both keys are optional. This file is data, not code, on purpose: every entry
+# is a permanent recall/precision improvement that can be reviewed on its own.
+#
+# Why vendors are constrained at all: NVD reuses product names across unrelated
+# projects, and the matcher's name heuristic cannot tell them apart. `git` is
+# the worst offender - of 189 CPE rows for product "git", 6 belong to the
+# Jenkins Git Plugin, which turned into 6 false positives on this machine.
+#
+# Do NOT add blanket rules here (e.g. "strip the lib prefix"). Checked against
+# the actual data: stripping "lib" would map libzip -> "zip" (Info-ZIP),
+# libcamera -> "camera" (Android's camera app), libcbor -> "cbor" (a .NET
+# library) and librest -> "rest" (plone.rest). Only verified aliases belong
+# in this file.
+
+# --- products whose NVD name differs from the Nix pname (recall) ------------
+
+["python3"]
+# NVD files CPython under product "python" (vendor python, 297 rows); the Nix
+# pname is the interpreter's own name, so the heuristic never found it.
+product = ["python"]
+vendor = ["python"]
+
+["nodejs"]
+# NVD uses "node.js" (vendor nodejs, 299 rows).
+product = ["node.js"]
+vendor = ["nodejs"]
+
+["libtheora"]
+# Verified: product "theora" is libtheora ("oc_huff_tree_unpack ... in libtheora
+# in Theora"), vendor xiph.
+product = ["theora"]
+vendor = ["xiph"]
+
+# ["linux"]
+# The kernel is product "linux_kernel" (vendor linux), but NVD currently has a
+# single CPE row for it, so the alias would produce noise without findings.
+# Enable it if that changes:
+# product = ["linux_kernel"]
+# vendor = ["linux"]
+
+# --- products shared with an unrelated project (precision) ------------------
+
+["git"]
+# product "git" vendors: git-scm 143, git 35, jenkins 6, gitforwindows 3,
+# git_project 1, cygwin 1. "jenkins" is the Jenkins Git Plugin.
+vendor = ["git-scm", "git", "git_project", "gitforwindows"]
+
+["snappy"]
+# Only "knplabs" (the PHP knp-snappy library) and "dain" are on record; Google's
+# C++ snappy files its advisories under its own name, which is absent.
+vendor = ["google"]
+
+["orc"]
+# Nix "orc" is GStreamer's Oil RunTime Compiler; product "orc" also covers
+# Apache ORC (a data format).
+vendor = ["gstreamer"]
+
+["zlib"]
+# product "zlib": zlib 4 rows, ruby-lang 3 (the Ruby zlib gem), cloudflare 1.
+vendor = ["zlib"]
+
+["brotli"]
+# product "brotli": google 3 rows, andybalholm 1 (a Go port with its own code).
+vendor = ["google"]
+
+["malcontent"]
+# Nix "malcontent" is GNOME's parental-controls library; the CPE rows are
+# Chainguard's supply-chain scanner of the same name.
+vendor = ["gnome"]
+
+["sudo"]
+# sudo-rs (trifectatech, memorysafety) ships as a separate product with the
+# same name.
+vendor = ["sudo_project"]
+
+["patch"]
+# product "patch": tanium 5 rows (a different product), gnu 3.
+vendor = ["gnu"]
+
+["cups"]
+# OpenPrinting maintains CUPS; Apple and SUSE rows describe the same code.
+vendor = ["openprinting", "apple", "suse"]
+
+["glib"]
+# GNOME's GLib. Red Hat publishes the same CVE for many of its products.
+vendor = ["gnome"]
+
+["binutils"]
+vendor = ["gnu"]
+
+["rsync"]
+# Filed under vendor "samba" (rsync lives in the Samba ecosystem).
+vendor = ["samba"]

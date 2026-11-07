@@ -19,6 +19,7 @@ import sys
 from pathlib import Path
 
 from . import __version__, db, fetch, match, report
+from . import overrides as overrides_module
 from .sources import epss, kev, nvd, osv, vulnix
 
 DEFAULT_WHITELIST = "~/.config/pkgvuln/whitelist.toml"
@@ -107,7 +108,8 @@ def _scan(connection, args: argparse.Namespace) -> int:
 
     if not getattr(args, "no_nvd", False):
         try:
-            count = match.scan(connection, snapshot["id"], packages)
+            entries = overrides_module.load(getattr(args, "overrides", None) or [])
+            count = match.scan(connection, snapshot["id"], packages, entries)
         except Exception as error:  # never lose the whole scan to one source
             logging.warning("NVD/CPE source skipped: %s", error)
         else:
@@ -219,6 +221,13 @@ def build_parser() -> argparse.ArgumentParser:
         )
         sub.add_argument("--vulnix-json", metavar="FILE", help="ingest saved 'vulnix --json' output")
         sub.add_argument("--no-nvd", action="store_true", help="skip the NVD/CPE source")
+        sub.add_argument(
+            "-o",
+            "--overrides",
+            action="append",
+            metavar="FILE",
+            help="extra TOML with product/vendor facts (bundled overrides.toml is always used)",
+        )
         sub.add_argument("--no-osv", action="store_true", help="skip OSV lookups")
         sub.add_argument("--offline", action="store_true", help="use cached OSV answers only")
 

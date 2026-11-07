@@ -499,6 +499,78 @@ class CpeMatchTest(DatabaseTest):
         )
 
 
+class OverridesTest(DatabaseTest):
+    def _affected(self, advisory_id, product, vendor, **ranges):
+        db.record_advisory(self.conn, {"id": advisory_id, "source": "nvd"})
+        self.conn.execute(
+            "INSERT INTO affected (advisory_id, vendor, product, version_exact,"
+            " start_incl, start_excl, end_incl, end_excl) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                advisory_id,
+                vendor,
+                product,
+                ranges.pop("version_exact", None),
+                ranges.pop("start_incl", None),
+                ranges.pop("start_excl", None),
+                ranges.pop("end_incl", None),
+                ranges.pop("end_excl", None),
+            ),
+        )
+
+    def test_bundled_file_loads(self):
+        from . import overrides
+
+        entries = overrides.load()
+        self.assertIn("git-scm", overrides.vendors_for(entries, "git"))
+        self.assertEqual(overrides.products_for(entries, "python3"), ["python"])
+        # Nothing is constrained for a package we have no opinion about.
+        self.assertIsNone(overrides.vendors_for(entries, "wget"))
+        self.assertEqual(overrides.products_for(entries, "wget"), [])
+
+    def test_vendor_gate_ignores_other_projects_with_the_same_product(self):
+        from . import match, overrides
+
+        entries = overrides.load()
+        self._affected("CVE-2022-36882", "git", "jenkins", end_incl="4.11.3")
+        self._affected("CVE-2022-0001", "git", "git-scm", end_excl="2.60")
+        self.conn.commit()
+        hits = list(match.candidates_for(self.conn, "2.56.0", "git", entries))
+        self.assertEqual(hits, [("git", ["CVE-2022-0001"])])
+
+    def test_product_alias_is_tried_before_the_heuristic(self):
+        from . import match, overrides
+
+        entries = overrides.load()
+        self._affected("CVE-2025-0002", "python", "python", end_excl="3.15.1")
+        self.conn.commit()
+        self.assertEqual(
+            list(match.candidates_for(self.conn, "3.15.0", "python3", entries)),
+            [("python", ["CVE-2025-0002"])],
+        )
+        # Without the curated entry the same package is unmatched.
+        self.assertEqual(list(match.candidates_for(self.conn, "3.15.0", "python3", {})), [])
+
+    def test_vendor_constraint_does_not_hide_known_vendors(self):
+        from . import match, overrides
+
+        entries = overrides.load()
+        # GLib is filed under several vendors by Red Hat; gnome is ours.
+        self._affected("CVE-2026-58016", "glib", "redhat", end_excl="2.90")
+        self._affected("CVE-2026-58017", "glib", "gnome", end_excl="2.90")
+        self.conn.commit()
+        hits = list(match.candidates_for(self.conn, "2.88.3", "glib", entries))
+        self.assertEqual(hits, [("glib", ["CVE-2026-58017"])])
+
+    def test_extra_file_extends_the_bundled_one(self):
+        from . import overrides
+
+        path = Path(self.tmp.name) / "extra.toml"
+        path.write_text('["wget"]\nvendor = ["gnu"]\n', encoding="utf-8")
+        entries = overrides.load([path])
+        self.assertEqual(overrides.vendors_for(entries, "wget"), {"gnu"})
+        self.assertIn("git-scm", overrides.vendors_for(entries, "git"))
+
+
 class CliTest(unittest.TestCase):
     def test_run_parser_provides_every_option_cmd_run_touches(self):
         from . import cli
