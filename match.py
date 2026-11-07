@@ -79,6 +79,14 @@ def candidates_for(connection, release: str, pname: str):
 def scan(connection, snapshot_id: int, packages: list) -> int:
     """Record matches for every package whose name/version hits the CPE data."""
     log = logging.getLogger(__name__)
+    affected = connection.execute("SELECT COUNT(*) AS n FROM affected").fetchone()["n"]
+    if affected == 0:
+        # Reporting "0 matches" here would look exactly like a clean system.
+        print(
+            "nvd: no advisory data - run 'pkgvuln sync --nvd' first."
+            " 0 matches is NOT the same as clean."
+        )
+        return 0
     connection.execute(
         "DELETE FROM matches WHERE snapshot_id = ? AND source = ?",
         (snapshot_id, SOURCE),

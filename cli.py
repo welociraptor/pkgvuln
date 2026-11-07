@@ -2,8 +2,13 @@
 
     pkgvuln sync     refresh KEV, EPSS (and NVD with --nvd)
     pkgvuln scan     run the matchers against the newest snapshot
-    pkgvuln report   print the delta report for the newest snapshot
-    pkgvuln run      scan + sync + report, for the systemd timer
+    pkgvuln report   print the delta report
+    pkgvuln run      refresh NVD, scan, enrich, report - for the systemd timer
+
+Exit codes: 0 clean, 2 un-whitelisted findings, 3 only whitelisted findings.
+``1`` is deliberately left to mean "crashed", so a traceback cannot be mistaken
+for a successful scan that merely found nothing. (vulnix uses 1 for
+"whitelisted only"; that collision is not worth inheriting.)
 """
 
 from __future__ import annotations
@@ -13,19 +18,10 @@ import logging
 import sys
 from pathlib import Path
 
-from . import __version__, db, match, report
+from . import __version__, db, fetch, match, report
 from .sources import epss, kev, nvd, osv, vulnix
 
 DEFAULT_WHITELIST = "~/.config/pkgvuln/whitelist.toml"
-
-
-def _log_level(args: argparse.Namespace) -> int:
-    return logging.INFO if args.verbose else logging.WARNING
-
-
-def _open(args: argparse.Namespace):
-    connection = db.connect(args.db)
-    return connection
 
 
 def _resolve_snapshot(connection, requested: int | None):
@@ -44,50 +40,57 @@ def _resolve_snapshot(connection, requested: int | None):
 
 
 def _whitelist_paths(args: argparse.Namespace) -> list[str]:
-    if args.no_whitelist:
+    if getattr(args, "no_whitelist", False):
         return []
-    paths = list(args.whitelist or [])
-    if not paths and DEFAULT_WHITELIST:
+    paths = list(getattr(args, "whitelist", None) or [])
+    if not paths:
         paths = [DEFAULT_WHITELIST]
     return paths
 
 
-def cmd_sync(args: argparse.Namespace) -> int:
-    connection = _open(args)
+def _sync_nvd(connection, args: argparse.Namespace) -> None:
+    names = getattr(args, "archives", None) or nvd.archives(
+        getattr(args, "years", nvd.YEARS)
+    )
     try:
-        if args.nvd:
-            names = args.archives or nvd.archives(args.years)
-            counts = nvd.sync(connection, names)
-            for name in names:
-                count = counts.get(name, 0)
-                status = "unchanged" if count == -1 else f"{count} advisories"
-                print(f"nvd {name}: {status}")
-        kev.sync(connection)
-        epss.sync(connection)
-        connection.commit()
-    finally:
-        connection.close()
-    return 0
+        counts = nvd.sync(connection, names)
+    except fetch.FetchError as error:
+        logging.warning("NVD sync failed: %s", error)
+        return
+    for name in names:
+        count = counts.get(name, 0)
+        status = "unchanged" if count == -1 else f"{count} advisories"
+        print(f"nvd {name}: {status}")
 
 
-def cmd_scan(args: argparse.Namespace) -> int:
-    if not hasattr(args, "vulnix"):
-        args.vulnix = False
-    connection = _open(args)
-    try:
-        snapshot = _resolve_snapshot(connection, args.snapshot)
-        packages = db.snapshot_packages(connection, snapshot["id"])
-        if not packages:
-            raise SystemExit(f"error: snapshot #{snapshot['id']} has no packages")
+def _sync_enrichment(connection) -> None:
+    """KEV and EPSS: cheap, and applied to whatever advisories exist now."""
+    for module in (kev, epss):
+        try:
+            module.sync(connection)
+        except fetch.FetchError as error:
+            logging.warning("%s sync failed: %s", module.__name__, error)
 
-        total = 0
-        if args.vulnix or args.vulnix_json:
-            if args.no_vulnix:
-                args.vulnix = False
-            connection.execute(
-                "DELETE FROM matches WHERE snapshot_id = ? AND source = ?",
-                (snapshot["id"], vulnix.SOURCE),
-            )
+
+def _sync(connection, args: argparse.Namespace) -> None:
+    if getattr(args, "nvd", False):
+        _sync_nvd(connection, args)
+    _sync_enrichment(connection)
+    connection.commit()
+
+
+def _scan(connection, args: argparse.Namespace) -> int:
+    snapshot = _resolve_snapshot(connection, getattr(args, "snapshot", None))
+    packages = db.snapshot_packages(connection, snapshot["id"])
+    if not packages:
+        raise SystemExit(f"error: snapshot #{snapshot['id']} has no packages")
+
+    total = 0
+
+    if getattr(args, "vulnix", False) or getattr(args, "vulnix_json", None):
+        if getattr(args, "no_vulnix", False) and not getattr(args, "vulnix_json", None):
+            pass
+        else:
             try:
                 result = vulnix.scan(
                     connection, snapshot["id"], packages, args.vulnix_json
@@ -102,59 +105,90 @@ def cmd_scan(args: argparse.Namespace) -> int:
                     f" {result['without_drv']} have no .drv left)"
                 )
 
-        if not args.no_nvd:
-            try:
-                count = match.scan(connection, snapshot["id"], packages)
-            except Exception as error:  # never lose the whole scan to one source
-                logging.warning("NVD/CPE source skipped: %s", error)
-            else:
-                total += count
-                print(f"nvd: {count} matches")
+    if not getattr(args, "no_nvd", False):
+        try:
+            count = match.scan(connection, snapshot["id"], packages)
+        except Exception as error:  # never lose the whole scan to one source
+            logging.warning("NVD/CPE source skipped: %s", error)
+        else:
+            total += count
+            print(f"nvd: {count} matches")
 
-        if not args.no_osv:
-            connection.execute(
-                "DELETE FROM matches WHERE snapshot_id = ? AND source = ?",
-                (snapshot["id"], osv.SOURCE),
+    if not getattr(args, "no_osv", False):
+        try:
+            count = osv.scan(
+                connection, snapshot["id"], packages,
+                offline=getattr(args, "offline", False),
             )
-            try:
-                count = osv.scan(
-                    connection, snapshot["id"], packages, offline=args.offline
-                )
-            except Exception as error:  # network failures must not lose the scan
-                logging.warning("OSV source skipped: %s", error)
-            else:
-                total += count
-                print(f"osv: {count} matches")
+        except Exception as error:  # network failures must not lose the scan
+            logging.warning("OSV source skipped: %s", error)
+        else:
+            total += count
+            print(f"osv: {count} matches")
 
-        connection.commit()
-        print(f"scan of snapshot #{snapshot['id']}: {total} matches recorded")
+    connection.commit()
+    print(f"scan of snapshot #{snapshot['id']}: {total} matches recorded")
+    return 0
+
+
+def _report(connection, args: argparse.Namespace) -> int:
+    snapshot = _resolve_snapshot(connection, getattr(args, "snapshot", None))
+    data = report.build(connection, snapshot["id"], _whitelist_paths(args))
+    if getattr(args, "json", False):
+        print(report.format_json(data))
+    else:
+        print(
+            report.format_text(
+                data,
+                limit=getattr(args, "limit", 20),
+                show_masked=getattr(args, "show_whitelisted", False),
+            )
+        )
+    return report.exit_code(data)
+
+
+def cmd_sync(args: argparse.Namespace) -> int:
+    connection = db.connect(args.db)
+    try:
+        _sync(connection, args)
     finally:
         connection.close()
     return 0
 
 
-def cmd_report(args: argparse.Namespace) -> int:
-    connection = _open(args)
+def cmd_scan(args: argparse.Namespace) -> int:
+    connection = db.connect(args.db)
     try:
-        snapshot = _resolve_snapshot(connection, args.snapshot)
-        data = report.build(connection, snapshot["id"], _whitelist_paths(args))
+        return _scan(connection, args)
     finally:
         connection.close()
 
-    if args.json:
-        print(report.format_json(data))
-    else:
-        print(report.format_text(data, limit=args.limit, show_masked=args.show_whitelisted))
-    return report.exit_code(data)
+
+def cmd_report(args: argparse.Namespace) -> int:
+    connection = db.connect(args.db)
+    try:
+        return _report(connection, args)
+    finally:
+        connection.close()
 
 
 def cmd_run(args: argparse.Namespace) -> int:
-    # Scan first: KEV and EPSS are applied to the advisories that exist, so
-    # syncing before the scan would leave newly found advisories unenriched
-    # until the next run.
-    cmd_scan(args)
-    cmd_sync(args)
-    return cmd_report(args)
+    connection = db.connect(args.db)
+    try:
+        # Order matters, twice over:
+        #   1. NVD data has to exist *before* matching, otherwise the first run
+        #      after install would report zero findings.
+        #   2. KEV/EPSS are applied *after* the scan so advisories discovered by
+        #      this very run get their scores.
+        if getattr(args, "nvd", False):
+            _sync_nvd(connection, args)
+            connection.commit()
+        _scan(connection, args)
+        _sync_enrichment(connection)
+        connection.commit()
+        return _report(connection, args)
+    finally:
+        connection.close()
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -169,67 +203,63 @@ def build_parser() -> argparse.ArgumentParser:
         default=db.default_db_path(),
         help="SQLite database written by track-packages (default: %(default)s)",
     )
-    parser.add_argument("-v", "--verbose", action="store_true", help="more logging")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     def add_common(sub: argparse.ArgumentParser) -> None:
+        # SUPPRESS so a subcommand does not overwrite the value parsed before it.
         sub.add_argument("--db", type=Path, default=argparse.SUPPRESS, help=argparse.SUPPRESS)
         sub.add_argument("-v", "--verbose", action="store_true", default=False)
 
+    def add_scan_options(sub: argparse.ArgumentParser) -> None:
+        sub.add_argument("--snapshot", type=int, help="snapshot id (default: newest)")
+        sub.add_argument(
+            "--vulnix",
+            action="store_true",
+            help="also run vulnix (sees only derivations whose .drv survives)",
+        )
+        sub.add_argument("--vulnix-json", metavar="FILE", help="ingest saved 'vulnix --json' output")
+        sub.add_argument("--no-nvd", action="store_true", help="skip the NVD/CPE source")
+        sub.add_argument("--no-osv", action="store_true", help="skip OSV lookups")
+        sub.add_argument("--offline", action="store_true", help="use cached OSV answers only")
+
+    def add_report_options(sub: argparse.ArgumentParser) -> None:
+        sub.add_argument("--json", action="store_true", help="machine readable output")
+        sub.add_argument("-w", "--whitelist", action="append", metavar="FILE")
+        sub.add_argument("--no-whitelist", action="store_true")
+        sub.add_argument(
+            "-s", "--show-whitelisted", action="store_true", help="list whitelisted findings"
+        )
+        sub.add_argument(
+            "--limit", type=int, default=20, help="entries per section (default: %(default)s)"
+        )
+
+    def add_nvd_options(sub: argparse.ArgumentParser) -> None:
+        sub.add_argument("--nvd", action="store_true", help="also refresh the NVD CVE feeds")
+        sub.add_argument("--years", type=int, default=nvd.YEARS, help=argparse.SUPPRESS)
+        sub.add_argument("--archives", nargs="+", help="explicit NVD archive names")
+
     sync_parser = subparsers.add_parser("sync", help="refresh advisory feeds")
     add_common(sync_parser)
-    sync_parser.add_argument("--nvd", action="store_true", help="also refresh the NVD CVE feeds")
-    sync_parser.add_argument("--years", type=int, default=nvd.YEARS, help=argparse.SUPPRESS)
-    sync_parser.add_argument("--archives", nargs="+", help="explicit NVD archive names")
-    sync_parser.set_defaults(func=cmd_sync)
+    add_nvd_options(sync_parser)
+    sync_parser.set_defaults(func=cmd_sync, nvd=False, archives=None)
 
     scan_parser = subparsers.add_parser("scan", help="run the matchers")
     add_common(scan_parser)
-    scan_parser.add_argument("--snapshot", type=int, help="snapshot id (default: newest)")
-    scan_parser.add_argument(
-        "--vulnix", action="store_true", help="also run vulnix (only sees derivations whose .drv survives)"
-    )
-    scan_parser.add_argument("--no-vulnix", action="store_true", help="skip the vulnix source")
-    scan_parser.add_argument("--no-nvd", action="store_true", help="skip the NVD/CPE source")
-    scan_parser.add_argument("--no-osv", action="store_true", help="skip OSV lookups")
-    scan_parser.add_argument(
-        "--vulnix-json", metavar="FILE", help="ingest saved 'vulnix --json' output ('-' for stdin)"
-    )
-    scan_parser.add_argument(
-        "--offline", action="store_true", help="use cached OSV answers only"
-    )
+    add_scan_options(scan_parser)
     scan_parser.set_defaults(func=cmd_scan)
 
     report_parser = subparsers.add_parser("report", help="print the delta report")
     add_common(report_parser)
     report_parser.add_argument("--snapshot", type=int, help="snapshot id (default: newest)")
-    report_parser.add_argument("--json", action="store_true", help="machine readable output")
-    report_parser.add_argument("-w", "--whitelist", action="append", metavar="FILE")
-    report_parser.add_argument("--no-whitelist", action="store_true")
-    report_parser.add_argument(
-        "-s", "--show-whitelisted", action="store_true", help="list whitelisted findings"
-    )
-    report_parser.add_argument(
-        "--limit", type=int, default=20, help="entries per section (default: %(default)s)"
-    )
+    add_report_options(report_parser)
     report_parser.set_defaults(func=cmd_report)
 
-    run_parser = subparsers.add_parser("run", help="sync + scan + report")
+    run_parser = subparsers.add_parser("run", help="refresh NVD, scan, enrich, report")
     add_common(run_parser)
-    run_parser.add_argument("--snapshot", type=int, default=None, help=argparse.SUPPRESS)
-    run_parser.add_argument("--vulnix", action="store_true")
-    run_parser.add_argument("--no-vulnix", action="store_true")
-    run_parser.add_argument("--no-nvd", action="store_true")
-    run_parser.add_argument("--no-osv", action="store_true")
-    run_parser.add_argument("--vulnix-json", metavar="FILE")
-    run_parser.add_argument("--nvd", action="store_true", help="also refresh NVD during sync")
-    run_parser.add_argument("--offline", action="store_true")
-    run_parser.add_argument("--json", action="store_true")
-    run_parser.add_argument("-w", "--whitelist", action="append", metavar="FILE")
-    run_parser.add_argument("--no-whitelist", action="store_true")
-    run_parser.add_argument("-s", "--show-whitelisted", action="store_true")
-    run_parser.add_argument("--limit", type=int, default=20)
-    run_parser.set_defaults(func=cmd_run)
+    add_scan_options(run_parser)
+    add_report_options(run_parser)
+    add_nvd_options(run_parser)
+    run_parser.set_defaults(func=cmd_run, nvd=False, archives=None)
 
     return parser
 
@@ -238,12 +268,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     logging.basicConfig(
-        level=_log_level(args), format="%(levelname)s %(name)s: %(message)s"
+        level=logging.INFO if getattr(args, "verbose", False) else logging.WARNING,
+        format="%(levelname)s %(name)s: %(message)s",
     )
     if not hasattr(args, "db"):
         args.db = db.default_db_path()
-    if not hasattr(args, "verbose"):
-        args.verbose = False
     return args.func(args)
 
 

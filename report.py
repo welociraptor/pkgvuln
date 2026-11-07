@@ -15,9 +15,10 @@ that a finding can be classified by when it appeared:
     the package name is still installed, but the previous snapshot matched an
     advisory on it that no longer matches - the upgrade cleared it.
 
-Exit codes follow vulnix's contract so existing muscle memory (and
-``systemctl --failed``) keeps working: 2 = un-whitelisted findings remain,
-1 = everything remaining is whitelisted, 0 = clean.
+Exit codes: 0 = clean, 2 = un-whitelisted findings remain, 3 = only
+whitelisted findings. ``1`` is left unused on purpose: that is what a Python
+traceback exits with, and "only whitelisted findings" must never look like a
+crash in a systemd unit.
 """
 
 from __future__ import annotations
@@ -367,9 +368,14 @@ def format_json(report: dict) -> str:
     return json.dumps(report, indent=1, sort_keys=False)
 
 
+CLEAN = 0
+WHITELISTED_ONLY = 3
+FINDINGS = 2
+
+
 def exit_code(report: dict) -> int:
     if report["current"]:
-        return 2
+        return FINDINGS
     if report["masked"]:
-        return 1
-    return 0
+        return WHITELISTED_ONLY
+    return CLEAN

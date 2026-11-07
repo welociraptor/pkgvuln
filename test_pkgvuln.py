@@ -312,7 +312,7 @@ class ReportTest(DatabaseTest):
         path = self._write_whitelist('["*"]\ncomment = "accepted risk"\n')
         data = report.build(self.conn, snapshot_id, [path])
         self.assertFalse(data["current"])
-        self.assertEqual(report.exit_code(data), 1)
+        self.assertEqual(report.exit_code(data), report.WHITELISTED_ONLY)
 
     def test_whitelist_until_expiry(self):
         snapshot_id = self.seed([("curl", "1.0", "curl-1.0", "/nix/store/a-curl-1.0")])
@@ -328,7 +328,7 @@ class ReportTest(DatabaseTest):
         data = report.build(
             self.conn, snapshot_id, [self._write_whitelist(f'["curl"]\nuntil = "{future}"\n')]
         )
-        self.assertEqual(report.exit_code(data), 1)
+        self.assertEqual(report.exit_code(data), report.WHITELISTED_ONLY)
 
     def test_whitelist_respects_version_sections(self):
         snapshot_id = self.seed([("curl", "1.0", "curl-1.0", "/nix/store/a-curl-1.0")])
@@ -497,6 +497,36 @@ class CpeMatchTest(DatabaseTest):
         self.assertEqual(
             self.conn.execute("SELECT COUNT(*) AS n FROM matches").fetchone()["n"], 1
         )
+
+
+class CliTest(unittest.TestCase):
+    def test_run_parser_provides_every_option_cmd_run_touches(self):
+        from . import cli
+
+        args = cli.build_parser().parse_args(["run", "--nvd"])
+        for attribute in (
+            "archives",
+            "years",
+            "nvd",
+            "snapshot",
+            "vulnix",
+            "vulnix_json",
+            "no_nvd",
+            "no_osv",
+            "offline",
+            "json",
+            "whitelist",
+            "no_whitelist",
+            "show_whitelisted",
+            "limit",
+            "db",
+        ):
+            self.assertTrue(hasattr(args, attribute), attribute)
+
+    def test_exit_codes_leave_one_free_for_crashes(self):
+        self.assertEqual(report.CLEAN, 0)
+        self.assertEqual(report.FINDINGS, 2)
+        self.assertEqual(report.WHITELISTED_ONLY, 3)
 
 
 class OsvParseTest(unittest.TestCase):
