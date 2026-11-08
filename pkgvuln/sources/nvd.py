@@ -4,7 +4,7 @@ This is the phase-2 source that the plan expected to need later; it is here
 first because ``sources/vulnix.py`` cannot see 44% of this system's
 derivations (their ``.drv`` files were garbage collected - measured: 602 of
 1095 present). Matching here needs nothing but the name and version that
-``track-packages.py`` already recorded, so coverage is 100%.
+``pkgvuln snapshot`` already recorded, so coverage is 100%.
 
 Feeds are ~25-45 MB gzipped per year and ~1.5 GB of JSON in total. They are
 parsed one archive at a time and only the parts needed for matching are kept

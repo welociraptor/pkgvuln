@@ -1,8 +1,9 @@
 """SQLite schema and connection helpers.
 
-The database file is shared with ``track-packages.py``: that script owns the
-``snapshots`` and ``packages`` tables and this module only ever reads them.
-Everything it writes lives in its own tables, created with ``IF NOT EXISTS``.
+The database holds both the snapshot history (``snapshots`` and ``packages``,
+written by :mod:`pkgvuln.snapshot`) and the advisory data derived from it. Every
+table is created with ``IF NOT EXISTS`` so an existing snapshot database keeps
+working.
 """
 
 from __future__ import annotations
@@ -11,9 +12,25 @@ import os
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS snapshots (
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    taken_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+
+CREATE TABLE IF NOT EXISTS packages (
+    snapshot_id INTEGER NOT NULL REFERENCES snapshots(id) ON DELETE CASCADE,
+    name        TEXT NOT NULL,
+    version     TEXT,
+    derivation  TEXT NOT NULL,
+    store_path  TEXT NOT NULL,
+    PRIMARY KEY (snapshot_id, derivation)
+);
+
+CREATE INDEX IF NOT EXISTS packages_name_idx ON packages (name);
+
 CREATE TABLE IF NOT EXISTS vuln_meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -138,7 +155,7 @@ CREATE TABLE IF NOT EXISTS outdated_summary (
 
 
 def default_db_path() -> Path:
-    """Same location track-packages.py uses, so both share one file."""
+    """The historical location, so existing snapshots and findings are kept."""
     data_home = os.environ.get("XDG_DATA_HOME") or os.path.join(
         os.environ.get("HOME", str(Path.home())), ".local", "share"
     )

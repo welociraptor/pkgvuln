@@ -28,7 +28,7 @@ _DOTTED_NUMERIC = re.compile(r"^\d+(?:\.\d+)*$")
 # and version and appends a marker: ``coreutils-full-9.12_fish-completions``,
 # ``alsa-firmware-1.2.4-zstd``, ``linux-7.3.1-modules``, ``perl-5.42.3-env``.
 # The marker is not part of the upstream release, so it must not take part in a
-# version comparison - but it *is* part of what track-packages.py parses out of
+# version comparison - but it *is* part of what the snapshotter parses out of
 # the store path, so it arrives here attached to the version.
 _VARIANT_SUFFIX = re.compile(
     r"(?:[-_]("

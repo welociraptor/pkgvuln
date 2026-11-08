@@ -1,5 +1,6 @@
 """Command line interface.
 
+    pkgvuln snapshot record installed package versions (the snapshotter)
     pkgvuln sync     refresh KEV, EPSS (and NVD with --nvd)
     pkgvuln scan     run the matchers against the newest snapshot
     pkgvuln report   print the delta report
@@ -21,7 +22,7 @@ import logging
 import sys
 from pathlib import Path
 
-from . import __version__, db, fetch, match, outdated, report
+from . import __version__, db, fetch, match, outdated, report, snapshot
 from . import overrides as overrides_module
 from .sources import epss, kev, nvd, osv, vulnix
 
@@ -38,7 +39,7 @@ def _resolve_snapshot(connection, requested: int | None):
     )
     if snapshot is None:
         raise SystemExit(
-            "error: no snapshot found in the database; run track-packages first"
+            "error: no snapshot found in the database; run `pkgvuln snapshot` first"
         )
     return snapshot
 
@@ -150,6 +151,27 @@ def _report(connection, args: argparse.Namespace) -> int:
             )
         )
     return report.exit_code(data)
+
+
+def _snapshot(args: argparse.Namespace) -> int:
+    roots = args.root or snapshot.discover_roots()
+    if not roots:
+        raise SystemExit("error: no Nix profiles found; pass --root explicitly")
+
+    packages = snapshot.collect_packages(roots)
+    snapshot_id, taken_at, previous_id, previous_taken_at, changes = (
+        snapshot.record_snapshot(args.db, packages)
+    )
+
+    print(f"Recorded {len(packages)} packages as snapshot #{snapshot_id} ({taken_at}).")
+    print(f"Database: {args.db}")
+    if not args.no_diff and previous_id is not None:
+        snapshot.print_changes(changes, previous_id, previous_taken_at)
+    return 0
+
+
+def cmd_snapshot(args: argparse.Namespace) -> int:
+    return _snapshot(args)
 
 
 def cmd_sync(args: argparse.Namespace) -> int:
@@ -269,7 +291,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--db",
         type=Path,
         default=db.default_db_path(),
-        help="SQLite database written by track-packages (default: %(default)s)",
+        help="SQLite database written by `pkgvuln snapshot` (default: %(default)s)",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -334,6 +356,23 @@ def build_parser() -> argparse.ArgumentParser:
             help="check candidates against the pin's outputs, so an alternate"
             " version line is not reported as outdated",
         )
+
+    snapshot_parser = subparsers.add_parser(
+        "snapshot", help="record installed package versions"
+    )
+    add_common(snapshot_parser)
+    snapshot_parser.add_argument(
+        "--root",
+        action="append",
+        type=Path,
+        metavar="PATH",
+        help="profile or store path to scan; may be repeated "
+        "(default: system profile and the current user's profiles)",
+    )
+    snapshot_parser.add_argument(
+        "--no-diff", action="store_true", help="do not print changes vs. the previous snapshot"
+    )
+    snapshot_parser.set_defaults(func=cmd_snapshot)
 
     sync_parser = subparsers.add_parser("sync", help="refresh advisory feeds")
     add_common(sync_parser)

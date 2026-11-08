@@ -4,8 +4,7 @@ Named ``fetch`` rather than ``http`` on purpose: a module called ``http``
 inside a package on ``sys.path`` shadows the stdlib one and breaks
 ``urllib.request`` in confusing ways.
 
-Stdlib only, because ``track-packages`` runs under a bare ``pkgs.python315``
-with no ``withPackages``.
+Stdlib only, so the tool runs under a bare Python with no site-packages.
 """
 
 from __future__ import annotations
@@ -19,7 +18,7 @@ import urllib.request
 
 _log = logging.getLogger(__name__)
 
-USER_AGENT = "pkgvuln/0.1 (+nixos track-packages)"
+USER_AGENT = "pkgvuln/0.1 (+nixos)"
 TIMEOUT = 60
 RETRIES = 3
 BACKOFF = 2.0

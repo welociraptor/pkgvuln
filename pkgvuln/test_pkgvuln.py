@@ -10,25 +10,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from . import db, names, nixver, report
+from . import db, names, nixver, report, snapshot
 from .sources import vulnix
-
-# The tables owned by track-packages.py, needed by the tests that build a
-# database from scratch. Kept in sync with track-packages.py's SCHEMA.
-SNAPSHOT_SCHEMA = """
-CREATE TABLE IF NOT EXISTS snapshots (
-    id       INTEGER PRIMARY KEY AUTOINCREMENT,
-    taken_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-);
-CREATE TABLE IF NOT EXISTS packages (
-    snapshot_id INTEGER NOT NULL REFERENCES snapshots(id) ON DELETE CASCADE,
-    name        TEXT NOT NULL,
-    version     TEXT,
-    derivation  TEXT NOT NULL,
-    store_path  TEXT NOT NULL,
-    PRIMARY KEY (snapshot_id, derivation)
-);
-"""
 
 
 class VersionComparisonTest(unittest.TestCase):
@@ -177,6 +160,61 @@ def drift_payload(outdated=2, ahead=1, verified=True):
     }
 
 
+class SnapshotTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.path = Path(self.tmp.name) / "packages.db"
+
+    def test_split_derivation_name(self):
+        self.assertEqual(
+            snapshot.split_derivation_name(
+                "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-python3.15-requests-2.32.3",
+                "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-python3.15-requests-2.32.3.drv",
+            ),
+            ("python3.15-requests", "2.32.3", "python3.15-requests-2.32.3"),
+        )
+        self.assertEqual(
+            snapshot.split_derivation_name(
+                "/nix/store/cccccccccccccccccccccccccccccccc-unit-1", "unknown-deriver"
+            ),
+            ("unit", "1", "unit-1"),
+        )
+        self.assertEqual(
+            snapshot.split_derivation_name(
+                "/nix/store/dddddddddddddddddddddddddddddddd-X-Restart-Triggers",
+                "unknown-deriver",
+            ),
+            ("X-Restart-Triggers", None, "X-Restart-Triggers"),
+        )
+
+    def test_record_snapshot_records_history_and_changes(self):
+        first = snapshot.record_snapshot(
+            self.path,
+            {"curl-8.21.0": ("curl", "8.21.0", "/nix/store/a-curl-8.21.0")},
+        )
+        self.assertEqual(first[2], None)
+        self.assertEqual(first[4], {"added": [], "removed": [], "updated": []})
+
+        second = snapshot.record_snapshot(
+            self.path,
+            {
+                "curl-8.22.0": ("curl", "8.22.0", "/nix/store/a-curl-8.22.0"),
+                "zlib-1.3": ("zlib", "1.3", "/nix/store/a-zlib-1.3"),
+            },
+        )
+        self.assertEqual(second[2], first[0])
+        self.assertEqual(second[4], {"added": ["zlib"], "removed": [], "updated": ["curl"]})
+
+        connection = db.connect(self.path)
+        self.addCleanup(connection.close)
+        rows = connection.execute(
+            "SELECT name, version FROM packages WHERE snapshot_id = ? ORDER BY name",
+            (second[0],),
+        ).fetchall()
+        self.assertEqual([tuple(row) for row in rows], [("curl", "8.22.0"), ("zlib", "1.3")])
+
+
 class DatabaseTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -184,10 +222,9 @@ class DatabaseTest(unittest.TestCase):
         self.path = Path(self.tmp.name) / "packages.db"
         self.conn = db.connect(self.path)
         self.addCleanup(self.conn.close)
-        self.conn.executescript(SNAPSHOT_SCHEMA)
 
     def seed(self, packages, previous=None):
-        """Insert a snapshot like track-packages.py does."""
+        """Insert a snapshot the way `pkgvuln snapshot` does."""
         if previous:
             self.conn.execute("INSERT INTO snapshots (taken_at) VALUES (?)", (previous,))
         cursor = self.conn.execute("INSERT INTO snapshots DEFAULT VALUES")
@@ -200,7 +237,7 @@ class DatabaseTest(unittest.TestCase):
         self.conn.commit()
         return snapshot_id
 
-    def test_schema_does_not_collide_with_snapshot_tables(self):
+    def test_schema_creates_snapshot_tables(self):
         self.conn.execute("INSERT INTO snapshots DEFAULT VALUES")
         tables = {
             row["name"]
@@ -1055,6 +1092,14 @@ class RunOutdatedTest(DatabaseTest):
 
 
 class CliTest(unittest.TestCase):
+    def test_snapshot_parser_has_its_own_options(self):
+        from . import cli
+
+        args = cli.build_parser().parse_args(["snapshot", "--root", "/nix/store/x", "--no-diff"])
+        self.assertEqual(args.root, [Path("/nix/store/x")])
+        self.assertTrue(args.no_diff)
+        self.assertTrue(hasattr(args, "db"))
+
     def test_run_parser_provides_every_option_cmd_run_touches(self):
         from . import cli
 
