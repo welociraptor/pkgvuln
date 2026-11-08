@@ -1,4 +1,4 @@
-"""Unit tests. Run with: python3 -m unittest pkgvuln.test_pkgvuln"""
+"""Unit tests. Run with: uv run python -m unittest discover -s tests"""
 
 from __future__ import annotations
 
@@ -10,8 +10,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from . import db, names, nixver, report, snapshot
-from .sources import vulnix
+from pkgvuln import db, names, nixver, report, snapshot
+from pkgvuln.sources import vulnix
 
 
 class VersionComparisonTest(unittest.TestCase):
@@ -430,7 +430,7 @@ class ReportTest(DatabaseTest):
 
     def test_drift_count_reaches_the_report(self):
         """The widget reads `outdated.counts.outdated` from `report --json`."""
-        from . import outdated
+        from pkgvuln import outdated
 
         snapshot_id = self.seed([("curl", "1.0", "curl-1.0", "/nix/store/a-curl-1.0")])
         self.assertIsNone(report.build(self.conn, snapshot_id, [])["outdated"])
@@ -446,7 +446,7 @@ class ReportTest(DatabaseTest):
         self.assertIsInstance(json.loads(report.format_json(data))["outdated"]["counts"], dict)
 
     def test_a_clean_snapshot_still_reports_drift(self):
-        from . import outdated
+        from pkgvuln import outdated
 
         snapshot_id = self.seed([("curl", "1.0", "curl-1.0", "/nix/store/a-curl-1.0")])
         outdated.record(self.conn, snapshot_id, drift_payload())
@@ -457,7 +457,7 @@ class ReportTest(DatabaseTest):
 
 class NvdParseTest(unittest.TestCase):
     def test_cpe_parsing(self):
-        from .sources import nvd
+        from pkgvuln.sources import nvd
 
         parsed = nvd.parse_cpe(
             "cpe:2.3:a:apache:log4j:2.14.1:*:*:*:*:*:*:*"
@@ -467,7 +467,7 @@ class NvdParseTest(unittest.TestCase):
         self.assertEqual(parsed["version_exact"], "2.14.1")
 
     def test_cpe_wildcards_and_other_parts(self):
-        from .sources import nvd
+        from pkgvuln.sources import nvd
 
         self.assertIsNone(nvd.parse_cpe("cpe:2.3:o:linux:linux_kernel:*:*:*:*:*:*:*:*"))
         self.assertIsNone(nvd.parse_cpe("cpe:2.3:a:vendor:*:*:*:*:*:*:*:*"))
@@ -475,7 +475,7 @@ class NvdParseTest(unittest.TestCase):
         self.assertIsNone(nvd.parse_cpe(""))
 
     def test_cpe_escaped_colon(self):
-        from .sources import nvd
+        from pkgvuln.sources import nvd
 
         parsed = nvd.parse_cpe(
             "cpe:2.3:a:some\\:vendor:thing:1.0:*:*:*:*:*:*:*"
@@ -483,7 +483,7 @@ class NvdParseTest(unittest.TestCase):
         self.assertEqual(parsed["product"], "thing")
 
     def test_cve_parsing_keeps_ranges_only_for_vulnerable_matches(self):
-        from .sources import nvd
+        from pkgvuln.sources import nvd
 
         item = {
             "cve": {
@@ -544,7 +544,7 @@ class CpeMatchTest(DatabaseTest):
         )
 
     def test_product_candidates_are_ordered_and_deduped(self):
-        from . import match
+        from pkgvuln import match
 
         self.assertEqual(
             match.product_candidates("Python-Numpy"), ["python-numpy", "python_numpy"]
@@ -552,7 +552,7 @@ class CpeMatchTest(DatabaseTest):
         self.assertEqual(match.product_candidates("curl"), ["curl"])
 
     def test_range_match(self):
-        from . import match
+        from pkgvuln import match
 
         self._affected("log4j", start_incl="2.0", end_excl="2.15.0")
         self.conn.commit()
@@ -563,7 +563,7 @@ class CpeMatchTest(DatabaseTest):
         self.assertEqual(list(match.candidates_for(self.conn, "2.15.0", "log4j")), [])
 
     def test_exact_version_ignores_trailing_zeros(self):
-        from . import match
+        from pkgvuln import match
 
         self._affected("curl", version_exact="7.80")
         self.conn.commit()
@@ -573,14 +573,14 @@ class CpeMatchTest(DatabaseTest):
         )
 
     def test_version_without_constraints_never_matches(self):
-        from . import match
+        from pkgvuln import match
 
         self._affected("log4j")
         self.conn.commit()
         self.assertEqual(list(match.candidates_for(self.conn, "2.14.1", "log4j")), [])
 
     def test_scan_records_matches_and_skips_unmatchable_versions(self):
-        from . import match
+        from pkgvuln import match
 
         self._affected("log4j", start_incl="2.0", end_excl="2.15.0")
         self.conn.commit()
@@ -597,7 +597,7 @@ class CpeMatchTest(DatabaseTest):
         self.assertEqual(row["store_path"], "/nix/store/a-log4j-2.14.1")
 
     def test_rerun_does_not_duplicate(self):
-        from . import match
+        from pkgvuln import match
 
         self._affected("log4j", start_incl="2.0", end_excl="2.15.0")
         self.conn.commit()
@@ -629,7 +629,7 @@ class OverridesTest(DatabaseTest):
         )
 
     def test_bundled_file_loads(self):
-        from . import overrides
+        from pkgvuln import overrides
 
         entries = overrides.load()
         self.assertIn("git-scm", overrides.vendors_for(entries, "git"))
@@ -641,7 +641,7 @@ class OverridesTest(DatabaseTest):
         self.assertEqual(overrides.products_for(entries, "wget"), [])
 
     def test_vendor_gate_ignores_other_projects_with_the_same_product(self):
-        from . import match, overrides
+        from pkgvuln import match, overrides
 
         entries = overrides.load()
         self._affected("CVE-2022-36882", "git", "jenkins", end_incl="4.11.3")
@@ -651,7 +651,7 @@ class OverridesTest(DatabaseTest):
         self.assertEqual(hits, [("git", ["CVE-2022-0001"])])
 
     def test_product_alias_is_tried_before_the_heuristic(self):
-        from . import match, overrides
+        from pkgvuln import match, overrides
 
         entries = overrides.load()
         self._affected("CVE-2025-0002", "python", "python", end_excl="3.15.1")
@@ -664,7 +664,7 @@ class OverridesTest(DatabaseTest):
         self.assertEqual(list(match.candidates_for(self.conn, "3.15.0", "python3", {})), [])
 
     def test_vendor_constraint_does_not_hide_known_vendors(self):
-        from . import match, overrides
+        from pkgvuln import match, overrides
 
         entries = overrides.load()
         # GLib is filed under several vendors by Red Hat; gnome is ours.
@@ -675,7 +675,7 @@ class OverridesTest(DatabaseTest):
         self.assertEqual(hits, [("glib", ["CVE-2026-58017"])])
 
     def test_extra_file_extends_the_bundled_one(self):
-        from . import overrides
+        from pkgvuln import overrides
 
         path = Path(self.tmp.name) / "extra.toml"
         path.write_text('["wget"]\nvendor = ["gnu"]\n', encoding="utf-8")
@@ -702,7 +702,7 @@ class OutdatedTest(DatabaseTest):
     }
 
     def _patch(self, name, value):
-        from . import outdated
+        from pkgvuln import outdated
 
         original = getattr(outdated, name)
         setattr(outdated, name, value)
@@ -735,7 +735,7 @@ class OutdatedTest(DatabaseTest):
         return evaluate
 
     def test_default_attribute_beats_alternatives(self):
-        from . import outdated
+        from pkgvuln import outdated
 
         top = outdated.top_level(self.ATTRS)
         index = outdated.index_by_pname(top)
@@ -749,7 +749,7 @@ class OutdatedTest(DatabaseTest):
         self.assertNotIn("haskellPackages.dbus", top)
 
     def test_ambiguous_names_are_not_guessed(self):
-        from . import outdated
+        from pkgvuln import outdated
 
         attrs = {
             "curl": {"pname": "curl", "version": "8.22.0"},
@@ -762,7 +762,7 @@ class OutdatedTest(DatabaseTest):
         self.assertEqual(outdated.resolve_attr("curl-minimal", attrs, index), (None, "absent"))
 
     def test_classify(self):
-        from . import outdated
+        from pkgvuln import outdated
 
         self.assertEqual(outdated.classify("1.2.3", "1.2.3"), outdated.CURRENT)
         self.assertEqual(outdated.classify("1.2.3", "1.3"), outdated.OUTDATED)
@@ -773,7 +773,7 @@ class OutdatedTest(DatabaseTest):
         self.assertEqual(outdated.classify("5.42.3-env", "5.42.3"), outdated.CURRENT)
 
     def test_compare_packages_reproduces_the_measured_candidates(self):
-        from . import outdated
+        from pkgvuln import outdated
 
         packages = [
             {"name": "boost", "version": "1.85.0", "store_path": "/nix/store/boost185"},
@@ -803,7 +803,7 @@ class OutdatedTest(DatabaseTest):
 
     def test_a_kept_version_line_is_not_an_upgrade(self):
         """`openssl_1_1` next to `openssl` means both are current on purpose."""
-        from . import outdated
+        from pkgvuln import outdated
 
         attrs = {
             "openssl": {"pname": "openssl", "version": "4.1.0"},
@@ -817,7 +817,7 @@ class OutdatedTest(DatabaseTest):
         self.assertIsNone(outdated.same_version_attr("openssl", "1.0.2", top, index))
 
     def test_unstable_versions_are_reported_as_unsure(self):
-        from . import outdated
+        from pkgvuln import outdated
 
         rows = outdated.compare_packages(
             [{"name": "boost", "version": "1.89.0-unstable-2021-05-09", "store_path": "/nix/store/x"}],
@@ -828,7 +828,7 @@ class OutdatedTest(DatabaseTest):
 
     def test_truncated_versions_are_reported_as_unsure(self):
         """`dbus-1` is the makeDBusConf derivation, not dbus version 1."""
-        from . import outdated
+        from pkgvuln import outdated
 
         self.assertTrue(outdated.looks_truncated("1", "1.16.2"))
         self.assertFalse(outdated.looks_truncated("1.0", "1.0.1"))
@@ -855,7 +855,7 @@ class OutdatedTest(DatabaseTest):
     def test_store_path_verification_settles_an_unmatchable_version(self):
         """A path the pin builds is current even when the version string cannot
         be matched to any attribute's version (an unstable snapshot of it)."""
-        from . import outdated
+        from pkgvuln import outdated
 
         packages = [
             {
@@ -886,7 +886,7 @@ class OutdatedTest(DatabaseTest):
         self.assertNotIn("in_pin", untouched)
 
     def test_summary_round_trip(self):
-        from . import outdated
+        from pkgvuln import outdated
 
         snapshot_id = self.seed(
             [("boost", "1.89.0", "boost-1.89.0", "/nix/store/aaa-boost")]
@@ -908,7 +908,7 @@ class OutdatedTest(DatabaseTest):
         self.assertIsNone(outdated.stored(self.conn, snapshot_id + 1))
 
     def test_attributes_are_cached_per_pin(self):
-        from . import outdated
+        from pkgvuln import outdated
 
         evaluate = self._fake_evaluate()
         first = outdated.load_attrs(self.conn, "/nix/store/aaa-source", "x86_64-linux")
@@ -925,7 +925,7 @@ class OutdatedTest(DatabaseTest):
         self.assertEqual(len(evaluate.calls), 4)
 
     def test_store_paths_are_cached_per_pname(self):
-        from . import outdated
+        from pkgvuln import outdated
 
         evaluate = self._fake_evaluate()
         pin = "/nix/store/aaa-source"
@@ -941,7 +941,7 @@ class OutdatedTest(DatabaseTest):
         self.assertEqual(len(evaluate.calls), 2)
 
     def test_batches_and_filter(self):
-        from . import outdated
+        from pkgvuln import outdated
 
         names = [f"pkg{index}" for index in range(5)]
         self.assertEqual(outdated.batches(names, size=2), [names[0:2], names[2:4], names[4:]])
@@ -952,7 +952,7 @@ class OutdatedTest(DatabaseTest):
         )
 
     def test_build_reports_and_verifies(self):
-        from . import outdated
+        from pkgvuln import outdated
 
         pin = "/nix/store/aaa-source"
         snapshot_id = self.seed(
@@ -989,7 +989,7 @@ class OutdatedTest(DatabaseTest):
         self.assertIn("store-path check", outdated.format_text(verified))
 
     def test_build_rejects_a_missing_snapshot(self):
-        from . import outdated
+        from pkgvuln import outdated
 
         self._fake_evaluate()
         with self.assertRaises(SystemExit):
@@ -1000,7 +1000,7 @@ class RunOutdatedTest(DatabaseTest):
     """`run` carries the version check, and must survive it failing."""
 
     def _args(self, **overrides):
-        from . import cli
+        from pkgvuln import cli
 
         args = cli.build_parser().parse_args(["run"])
         for key, value in overrides.items():
@@ -1008,7 +1008,7 @@ class RunOutdatedTest(DatabaseTest):
         return args
 
     def test_broken_nixpkgs_does_not_break_the_scan(self):
-        from . import cli, outdated
+        from pkgvuln import cli, outdated
 
         self.seed([("curl", "8.22.0", "curl-8.22.0", "/nix/store/aaa-curl")])
 
@@ -1027,7 +1027,7 @@ class RunOutdatedTest(DatabaseTest):
         self.assertEqual(captured.getvalue(), "")
 
     def test_no_outdated_skips_the_comparison(self):
-        from . import cli, outdated
+        from pkgvuln import cli, outdated
 
         self.seed([("curl", "8.22.0", "curl-8.22.0", "/nix/store/aaa-curl")])
 
@@ -1040,7 +1040,7 @@ class RunOutdatedTest(DatabaseTest):
         cli._report_outdated(self.conn, self._args(no_outdated=True))
 
     def test_section_is_printed_with_the_advisory_report(self):
-        from . import cli, outdated
+        from pkgvuln import cli, outdated
 
         self.seed([("boost", "1.89.0", "boost-1.89.0", "/nix/store/aaa-boost")])
         args = self._args(nixpkgs="/nix/store/aaa-source", verify_store_paths=True)
@@ -1093,7 +1093,7 @@ class RunOutdatedTest(DatabaseTest):
 
 class CliTest(unittest.TestCase):
     def test_snapshot_parser_has_its_own_options(self):
-        from . import cli
+        from pkgvuln import cli
 
         args = cli.build_parser().parse_args(["snapshot", "--root", "/nix/store/x", "--no-diff"])
         self.assertEqual(args.root, [Path("/nix/store/x")])
@@ -1101,7 +1101,7 @@ class CliTest(unittest.TestCase):
         self.assertTrue(hasattr(args, "db"))
 
     def test_run_parser_provides_every_option_cmd_run_touches(self):
-        from . import cli
+        from pkgvuln import cli
 
         args = cli.build_parser().parse_args(["run", "--nvd"])
         for attribute in (
@@ -1129,13 +1129,13 @@ class CliTest(unittest.TestCase):
             self.assertTrue(hasattr(args, attribute), attribute)
 
     def test_run_does_the_outdated_check_by_default(self):
-        from . import cli
+        from pkgvuln import cli
 
         self.assertFalse(cli.build_parser().parse_args(["run"]).no_outdated)
         self.assertTrue(cli.build_parser().parse_args(["run", "--no-outdated"]).no_outdated)
 
     def test_outdated_parser_provides_every_option_cmd_outdated_touches(self):
-        from . import cli
+        from pkgvuln import cli
 
         args = cli.build_parser().parse_args(["outdated", "--verify-store-paths"])
         for attribute in (
@@ -1161,7 +1161,7 @@ class CliTest(unittest.TestCase):
 
 class OsvParseTest(unittest.TestCase):
     def test_epss_csv_parsing(self):
-        from .sources import epss
+        from pkgvuln.sources import epss
 
         text = (
             "#model_version:v2024.01.01,score_date:2024-01-02T00:00:00Z\n"
@@ -1175,7 +1175,7 @@ class OsvParseTest(unittest.TestCase):
         self.assertNotIn("not-a-cve", scores)
 
     def test_osv_severity_is_coarse(self):
-        from .sources import osv
+        from pkgvuln.sources import osv
 
         vuln = {"database_specific": {"severity": "HIGH"}}
         self.assertEqual(osv._severity(vuln), "HIGH")

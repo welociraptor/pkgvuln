@@ -1,6 +1,6 @@
 [build-system]
-requires = ["setuptools>=68"]
-build-backend = "setuptools.build_meta"
+requires = ["uv_build>=0.12.5,<0.14"]
+build-backend = "uv_build"
 
 [project]
 name = "pkgvuln"
@@ -12,9 +12,3 @@ dependencies = []
 
 [project.scripts]
 pkgvuln = "pkgvuln.cli:main"
-
-[tool.setuptools]
-packages = ["pkgvuln", "pkgvuln.sources"]
-
-[tool.setuptools.package-data]
-pkgvuln = ["*.toml"]

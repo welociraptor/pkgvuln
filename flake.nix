@@ -12,7 +12,7 @@
       packages = forAllSystems (system:
         let
           pkgs = nixpkgs.legacyPackages.${system};
-          python = pkgs.python3;
+          python = pkgs.python315;
         in
         {
           default = python.pkgs.buildPythonApplication {
@@ -20,11 +20,11 @@
             version = "0.1.0";
             pyproject = true;
             src = self;
-            build-system = [ python.pkgs.setuptools ];
+            build-system = [ python.pkgs.uv-build ];
             doCheck = true;
             checkPhase = ''
               runHook preCheck
-              python -m unittest pkgvuln.test_pkgvuln
+              PYTHONPATH=src python -m unittest discover -s tests
               runHook postCheck
             '';
             meta = {
@@ -40,5 +40,21 @@
           program = "${self.packages.${system}.default}/bin/pkgvuln";
         };
       });
+
+      devShells = forAllSystems (system:
+        let
+          pkgs = nixpkgs.legacyPackages.${system};
+          python = pkgs.python315;
+        in
+        {
+          default = pkgs.mkShell {
+            packages = [ pkgs.uv python ];
+            shellHook = ''
+              # Use the interpreter from the shell; never download one.
+              export UV_PYTHON=${python}/bin/python
+              export UV_PYTHON_DOWNLOADS=never
+            '';
+          };
+        });
     };
 }

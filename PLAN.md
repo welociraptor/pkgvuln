@@ -8,7 +8,7 @@ changed since the last snapshot, and what was fixed by an update.
 advisory ingestion, matching and reporting in the **same** SQLite database.
 
     pkgvuln --help
-    python3 -m unittest pkgvuln.test_pkgvuln     # no network needed
+    uv run python -m unittest discover -s tests  # no network needed
 
 ## Measured starting point
 
@@ -50,8 +50,8 @@ reports how much it could actually see.
   ecosystem"}`. The Nix↔OSV namespace translation in `names.py` is mandatory.
 - **`meta.identifiers` is nearly empty** (121 files in the pinned nixpkgs;
   `product` is just `toLower pname`). Not a usable CPE map.
-- **Standard Python packaging**: `pkgvuln` is installable from `pyproject.toml`
-  and the flake exposes it as a package.
+- **uv-managed packaging**: `uv_build` is the build backend, `uv.lock` is
+  committed, and the flake exposes both the package and a development shell.
 
 ## Steps
 
@@ -60,7 +60,7 @@ reports how much it could actually see.
 ### Phase 1 — end-to-end (done)
 
 - [x] **1. Package skeleton.** `python3 -m pkgvuln --help`; `python3 -m
-  unittest pkgvuln.test_pkgvuln`.
+  unittest discover -s tests`.
 - [x] **2. Schema (`db.py`).** `advisories`, `affected`, `matches`,
   `osv_queries`, `feeds`, `vuln_meta`, all `IF NOT EXISTS`, plus a forward
   migration for `feeds.payload`. Test: snapshot tables coexist.
@@ -195,8 +195,8 @@ reports how much it could actually see.
 
     PLAN.md                  this file
     README.md                usage
-    flake.nix  pyproject.toml
-    pkgvuln/
+    flake.nix  pyproject.toml  uv.lock  .python-version
+    src/pkgvuln/
       __init__.py  __main__.py  cli.py
       snapshot.py  installed versions -> snapshots/packages tables
       db.py        schema, connection, advisory/match writers
@@ -215,7 +215,7 @@ reports how much it could actually see.
         kev.py     CISA KEV catalogue
         epss.py    FIRST EPSS scores
         feeds.py   ETag + cached-payload fetch helper
-      test_pkgvuln.py
+    tests/test_pkgvuln.py
 
 ## Usage
 
