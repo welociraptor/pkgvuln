@@ -24,6 +24,19 @@ _DATED = re.compile(r"^\d{4}-\d{2}-\d{2}")
 _UNMATCHABLE_PREFIXES = ("unstable", "git-", "master", "head-", "HEAD")
 _DOTTED_NUMERIC = re.compile(r"^\d+(?:\.\d+)*$")
 
+# nixpkgs builds *variants* of a package whose derivation name keeps the pname
+# and version and appends a marker: ``coreutils-full-9.12_fish-completions``,
+# ``alsa-firmware-1.2.4-zstd``, ``linux-7.3.1-modules``, ``perl-5.42.3-env``.
+# The marker is not part of the upstream release, so it must not take part in a
+# version comparison - but it *is* part of what track-packages.py parses out of
+# the store path, so it arrives here attached to the version.
+_VARIANT_SUFFIX = re.compile(
+    r"(?:[-_]("
+    r"fish[-_]completions|zstd|env|modules|gsettings[-_]schemas"
+    r"|dev|man|doc|info|out|lib|bin|debug"
+    r"))+$"
+)
+
 
 def _next_component(text: str, index: int) -> tuple[str, int]:
     """Port of Nix's ``nextComponent`` (src/libstore/names.cc)."""
@@ -120,6 +133,22 @@ def upstream_version(version: str | None) -> str | None:
     candidate = _OUTPUT_SUFFIX.sub("", candidate)
     candidate = _REVISION_SUFFIX.sub("", candidate)
     return candidate or None
+
+
+def strip_variants(version: str | None) -> str | None:
+    """Drop derivation-variant markers from the end of a version string.
+
+    Only for *comparisons* ("is there something newer?"): two derivations that
+    differ only by the marker are the same upstream release, so
+    ``9.12_fish-completions`` must compare equal to ``9.12`` rather than newer.
+    :func:`upstream_version` is deliberately left alone - it answers a
+    different question and its output feeds CPE matching.
+    """
+    if not version:
+        return None
+    candidate = version.strip()
+    stripped = _VARIANT_SUFFIX.sub("", candidate)
+    return stripped or candidate
 
 
 def in_range(

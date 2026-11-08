@@ -11,7 +11,7 @@ import os
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS vuln_meta (
@@ -83,6 +83,43 @@ CREATE TABLE IF NOT EXISTS feeds (
     sha256     TEXT,
     payload    BLOB,   -- gzipped copy of the feed, so a 304 can still be applied
     fetched_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+
+-- Evaluated nixpkgs, cached per pin. `pin` is the store path of the nixpkgs
+-- source, which is content addressed, so two pins can never collide. One row
+-- per pin: comparing an installed system against nixpkgs costs an evaluation
+-- (~75 s for 100k attributes on this machine) and the answer cannot change for
+-- the same pin.
+CREATE TABLE IF NOT EXISTS nixpkgs_pins (
+    pin       TEXT NOT NULL,
+    system    TEXT NOT NULL,
+    evaluated TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    attrs     INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (pin, system)
+);
+
+-- attrPath -> pname/version, straight from `nix-env -qa --json`.
+CREATE TABLE IF NOT EXISTS nixpkgs_attrs (
+    pin     TEXT NOT NULL,
+    system  TEXT NOT NULL,
+    attr    TEXT NOT NULL,   -- "gtk3", "haskellPackages.dbus", "linux_7_3"
+    pname   TEXT,
+    version TEXT,
+    PRIMARY KEY (pin, system, attr)
+);
+
+CREATE INDEX IF NOT EXISTS nixpkgs_attrs_pname_idx
+    ON nixpkgs_attrs (pin, system, pname);
+
+-- Store paths of every output of the attributes that were evaluated with
+-- `--out-path`, keyed by the *pname* nix-env was filtered on (that is the unit
+-- of work, and how re-evaluation is skipped). Only filled on demand.
+CREATE TABLE IF NOT EXISTS nixpkgs_outputs (
+    pin    TEXT NOT NULL,
+    system TEXT NOT NULL,
+    pname  TEXT NOT NULL,
+    attrs  TEXT NOT NULL,   -- JSON: {attr: {output: store path}}
+    PRIMARY KEY (pin, system, pname)
 );
 """
 

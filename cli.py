@@ -4,8 +4,11 @@
     pkgvuln scan     run the matchers against the newest snapshot
     pkgvuln report   print the delta report
     pkgvuln run      refresh NVD, scan, enrich, report - for the systemd timer
+    pkgvuln outdated compare the snapshot with the versions nixpkgs pins
 
 Exit codes: 0 clean, 2 un-whitelisted findings, 3 only whitelisted findings.
+``outdated`` exits 0 as well unless ``--fail-on-outdated`` is given; "an upgrade
+exists" is information, not a failure.
 ``1`` is deliberately left to mean "crashed", so a traceback cannot be mistaken
 for a successful scan that merely found nothing. (vulnix uses 1 for
 "whitelisted only"; that collision is not worth inheriting.)
@@ -18,7 +21,7 @@ import logging
 import sys
 from pathlib import Path
 
-from . import __version__, db, fetch, match, report
+from . import __version__, db, fetch, match, outdated, report
 from . import overrides as overrides_module
 from .sources import epss, kev, nvd, osv, vulnix
 
@@ -174,6 +177,33 @@ def cmd_report(args: argparse.Namespace) -> int:
         connection.close()
 
 
+def cmd_outdated(args: argparse.Namespace) -> int:
+    connection = db.connect(args.db)
+    try:
+        snapshot = _resolve_snapshot(connection, args.snapshot)
+        try:
+            pin = outdated.resolve_pin(args.nixpkgs)
+            data = outdated.build(
+                connection,
+                snapshot["id"],
+                pin,
+                system=args.system,
+                refresh=args.refresh,
+                verify=args.verify_store_paths,
+            )
+        except outdated.EvaluationError as error:
+            raise SystemExit(f"error: {error}") from error
+        if args.json:
+            print(outdated.format_json(data))
+        else:
+            print(outdated.format_text(data, limit=args.limit))
+        if args.fail_on_outdated and data["counts"][outdated.OUTDATED]:
+            return report.FINDINGS
+        return 0
+    finally:
+        connection.close()
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     connection = db.connect(args.db)
     try:
@@ -269,6 +299,44 @@ def build_parser() -> argparse.ArgumentParser:
     add_report_options(run_parser)
     add_nvd_options(run_parser)
     run_parser.set_defaults(func=cmd_run, nvd=False, archives=None)
+
+    outdated_parser = subparsers.add_parser(
+        "outdated", help="compare the snapshot with the versions nixpkgs pins"
+    )
+    add_common(outdated_parser)
+    outdated_parser.add_argument(
+        "--snapshot", type=int, help="snapshot id (default: newest)"
+    )
+    outdated_parser.add_argument(
+        "--nixpkgs",
+        metavar="PATH",
+        help="nixpkgs source to compare against (default: $PKGVULN_NIXPKGS, else"
+        " the flake in the current directory)",
+    )
+    outdated_parser.add_argument(
+        "--system", help="Nix system to evaluate for (default: current system)"
+    )
+    outdated_parser.add_argument(
+        "--refresh",
+        action="store_true",
+        help="re-evaluate nixpkgs even if this pin is cached",
+    )
+    outdated_parser.add_argument(
+        "--verify-store-paths",
+        action="store_true",
+        help="check candidates against the pin's outputs, so an alternate version"
+        " line is not reported as outdated",
+    )
+    outdated_parser.add_argument("--json", action="store_true", help="machine readable output")
+    outdated_parser.add_argument(
+        "--limit", type=int, default=20, help="entries per section (default: %(default)s)"
+    )
+    outdated_parser.add_argument(
+        "--fail-on-outdated",
+        action="store_true",
+        help="exit 2 when something is outdated",
+    )
+    outdated_parser.set_defaults(func=cmd_outdated)
 
     return parser
 

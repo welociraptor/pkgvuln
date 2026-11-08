@@ -129,6 +129,27 @@ class NamesTest(unittest.TestCase):
         )
 
 
+class VariantStripTest(unittest.TestCase):
+    """Variant markers are part of the derivation name, not of the release."""
+
+    def test_strips_variant_markers(self):
+        self.assertEqual(nixver.strip_variants("9.12_fish-completions"), "9.12")
+        self.assertEqual(nixver.strip_variants("1.2.4-zstd"), "1.2.4")
+        self.assertEqual(nixver.strip_variants("7.3.1-modules"), "7.3.1")
+        self.assertEqual(nixver.strip_variants("5.42.3-env"), "5.42.3")
+        self.assertEqual(nixver.strip_variants("50.1-gsettings-schemas"), "50.1")
+        self.assertEqual(nixver.strip_variants("2026.09.03-zstd"), "2026.09.03")
+
+    def test_keeps_real_version_suffixes(self):
+        for version in ("1.0", "1.0.0", "1.0-beta", "1.0-rc2", "2.4.2-r3", "5.2p37"):
+            with self.subTest(version=version):
+                self.assertEqual(nixver.strip_variants(version), version)
+
+    def test_empty_and_none(self):
+        self.assertIsNone(nixver.strip_variants(None))
+        self.assertIsNone(nixver.strip_variants(""))
+
+
 class DatabaseTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -573,6 +594,255 @@ class OverridesTest(DatabaseTest):
         self.assertIn("git-scm", overrides.vendors_for(entries, "git"))
 
 
+class OutdatedTest(DatabaseTest):
+    """Layer 1 compares versions, layer 2 resolves alternate version lines."""
+
+    # A miniature nixpkgs built from the cases measured on the real system.
+    ATTRS = {
+        "boost": {"pname": "boost", "version": "1.91.0"},
+        "boost189": {"pname": "boost", "version": "1.89.0"},
+        "db": {"pname": "db", "version": "5.3.28"},
+        "db4": {"pname": "db", "version": "4.8.30"},
+        "dbus": {"pname": "dbus", "version": "1.16.2"},
+        "makeDBusConf": {"pname": "dbus", "version": "1"},
+        "gtk3": {"pname": "gtk+3", "version": "3.24.52"},
+        "coreutils-full": {"pname": "coreutils-full", "version": "9.12"},
+        "haskellPackages.dbus": {"pname": "dbus", "version": "1.4.2"},
+        "python314Packages.foo": {"pname": "foo", "version": "1.0"},
+    }
+
+    def _patch(self, name, value):
+        from . import outdated
+
+        original = getattr(outdated, name)
+        setattr(outdated, name, value)
+        self.addCleanup(setattr, outdated, name, original)
+
+    def _fake_evaluate(self, with_output_paths=None):
+        """A stand-in for nix-env that records how often it was called."""
+        calls = []
+
+        def evaluate(pin, names=None, with_outputs=False, timeout=None):
+            calls.append((set(names or ()), with_outputs))
+            # nix-env filters on pname, so does the stand-in.
+            selected = {
+                attr: meta
+                for attr, meta in self.ATTRS.items()
+                if names is None or meta["pname"] in names
+            }
+            if not with_outputs:
+                return selected
+            payload = {}
+            for attr, meta in selected.items():
+                payload[attr] = dict(meta)
+                payload[attr]["outputs"] = (
+                    with_output_paths or {}
+                ).get(attr, {"out": f"/nix/store/{attr}"})
+            return payload
+
+        evaluate.calls = calls
+        self._patch("evaluate", evaluate)
+        return evaluate
+
+    def test_default_attribute_beats_alternatives(self):
+        from . import outdated
+
+        top = outdated.top_level(self.ATTRS)
+        index = outdated.index_by_pname(top)
+        self.assertEqual(outdated.resolve_attr("boost", top, index), ("boost", "default"))
+        # dbus must map onto pkgs.dbus, never onto makeDBusConf's dbus-1.
+        self.assertEqual(outdated.resolve_attr("dbus", top, index), ("dbus", "default"))
+        # A pname that is not an attribute path resolves when it is unambiguous.
+        self.assertEqual(outdated.resolve_attr("gtk+3", top, index), ("gtk3", "pname"))
+        # Only nested attributes carry this pname, so the top level cannot say.
+        self.assertEqual(outdated.resolve_attr("foo", top, index), (None, "absent"))
+        self.assertNotIn("haskellPackages.dbus", top)
+
+    def test_ambiguous_names_are_not_guessed(self):
+        from . import outdated
+
+        attrs = {
+            "curl": {"pname": "curl", "version": "8.22.0"},
+            "curlFull": {"pname": "curl", "version": "8.22.0"},
+        }
+        index = outdated.index_by_pname(attrs)
+        self.assertEqual(outdated.resolve_attr("curl-minimal", attrs, index), (None, "absent"))
+        del attrs["curl"]
+        index = outdated.index_by_pname(attrs)
+        self.assertEqual(outdated.resolve_attr("curl-minimal", attrs, index), (None, "absent"))
+
+    def test_classify(self):
+        from . import outdated
+
+        self.assertEqual(outdated.classify("1.2.3", "1.2.3"), outdated.CURRENT)
+        self.assertEqual(outdated.classify("1.2.3", "1.3"), outdated.OUTDATED)
+        self.assertEqual(outdated.classify("2.0", "1.9"), outdated.AHEAD)
+        self.assertEqual(outdated.classify(None, "1.0"), outdated.UNMAPPED)
+        # Variant markers are the same release, not a newer one.
+        self.assertEqual(outdated.classify("9.12_fish-completions", "9.12"), outdated.CURRENT)
+        self.assertEqual(outdated.classify("5.42.3-env", "5.42.3"), outdated.CURRENT)
+
+    def test_compare_packages_reproduces_the_measured_candidates(self):
+        from . import outdated
+
+        packages = [
+            {"name": "boost", "version": "1.89.0", "store_path": "/nix/store/boost189"},
+            {"name": "dbus", "version": "1", "store_path": "/nix/store/dbus-1"},
+            {"name": "gtk+3", "version": "3.24.52", "store_path": "/nix/store/gtk3"},
+            {"name": "coreutils-full", "version": "9.12_fish-completions", "store_path": "/nix/store/coreutils"},
+            {"name": "X-Restart-Triggers-polkit", "version": None, "store_path": "/nix/store/triggers"},
+        ]
+        rows = {row["name"]: row for row in outdated.compare_packages(packages, self.ATTRS)}
+        self.assertEqual(rows["boost"]["status"], outdated.OUTDATED)
+        self.assertEqual(rows["boost"]["attr"], "boost")
+        self.assertEqual(rows["boost"]["confidence"], "certain")
+        self.assertEqual(rows["dbus"]["status"], outdated.OUTDATED)
+        self.assertEqual(rows["gtk+3"]["status"], outdated.CURRENT)
+        self.assertEqual(rows["gtk+3"]["attr"], "gtk3")
+        self.assertEqual(rows["coreutils-full"]["status"], outdated.CURRENT)
+        self.assertEqual(rows["X-Restart-Triggers-polkit"]["status"], outdated.UNMAPPED)
+
+    def test_unstable_versions_are_reported_as_unsure(self):
+        from . import outdated
+
+        rows = outdated.compare_packages(
+            [{"name": "boost", "version": "1.89.0-unstable-2021-05-09", "store_path": "/nix/store/x"}],
+            {"boost": {"pname": "boost", "version": "1.91.0"}},
+        )
+        self.assertEqual(rows[0]["status"], outdated.OUTDATED)
+        self.assertEqual(rows[0]["confidence"], "unsure")
+
+    def test_truncated_versions_are_reported_as_unsure(self):
+        """`dbus-1` is the makeDBusConf derivation, not dbus version 1."""
+        from . import outdated
+
+        self.assertTrue(outdated.looks_truncated("1", "1.16.2"))
+        self.assertFalse(outdated.looks_truncated("1.0", "1.0.1"))
+        self.assertFalse(outdated.looks_truncated("3", "3") )
+        rows = outdated.compare_packages(
+            [{"name": "dbus", "version": "1", "store_path": "/nix/store/dbus-1"}],
+            {"dbus": {"pname": "dbus", "version": "1.16.2"}},
+        )
+        self.assertEqual(rows[0]["status"], outdated.OUTDATED)
+        self.assertEqual(rows[0]["confidence"], "unsure")
+        self.assertIn("unsure", outdated.format_text(
+            {
+                "snapshot": {"id": 1, "taken_at": "now"},
+                "nixpkgs": {"pin": "/nix/store/x", "system": "s", "attrs": 1,
+                            "verified": False, "resolved_candidates": 0},
+                "packages": 1,
+                "counts": {outdated.CURRENT: 0, outdated.OUTDATED: 1,
+                           outdated.AHEAD: 0, outdated.UNMAPPED: 0},
+                "outdated": rows,
+                "ahead": [],
+            }
+        ))
+
+    def test_store_path_verification_drops_alternate_lines(self):
+        from . import outdated
+
+        packages = [
+            {"name": "boost", "version": "1.89.0", "store_path": "/nix/store/boost189"},
+            {"name": "dbus", "version": "1", "store_path": "/nix/store/makeDBusConf"},
+            {"name": "db", "version": "4.7.0", "store_path": "/nix/store/old-db"},
+        ]
+        rows = outdated.compare_packages(packages, self.ATTRS)
+        paths = {
+            "/nix/store/boost189": {"attr": "boost189", "output": "out"},
+            "/nix/store/makeDBusConf": {"attr": "makeDBusConf", "output": "out"},
+        }
+        outdated.apply_verification(rows, paths)
+        by_name = {row["name"]: row for row in rows}
+        self.assertEqual(by_name["boost"]["status"], outdated.CURRENT)
+        self.assertEqual(by_name["boost"]["attr"], "boost189")
+        self.assertEqual(by_name["boost"]["verified_output"], "out")
+        self.assertTrue(by_name["boost"]["in_pin"])
+        self.assertEqual(by_name["dbus"]["status"], outdated.CURRENT)
+        # Not in the pin: real drift, and it must stay visible.
+        self.assertEqual(by_name["db"]["status"], outdated.OUTDATED)
+        self.assertFalse(by_name["db"]["in_pin"])
+        self.assertNotIn("verified_output", by_name["db"])
+
+    def test_attributes_are_cached_per_pin(self):
+        from . import outdated
+
+        evaluate = self._fake_evaluate()
+        first = outdated.load_attrs(self.conn, "/nix/store/aaa-source", "x86_64-linux")
+        second = outdated.load_attrs(self.conn, "/nix/store/aaa-source", "x86_64-linux")
+        self.assertEqual(len(evaluate.calls), 1)
+        self.assertEqual(first, second)
+        outdated.load_attrs(self.conn, "/nix/store/aaa-source", "x86_64-linux", refresh=True)
+        self.assertEqual(len(evaluate.calls), 2)
+        # A different pin is a different evaluation.
+        outdated.load_attrs(self.conn, "/nix/store/bbb-source", "x86_64-linux")
+        self.assertEqual(len(evaluate.calls), 3)
+        # Another system is too, so a remote pin cannot reuse local paths.
+        outdated.load_attrs(self.conn, "/nix/store/aaa-source", "aarch64-linux")
+        self.assertEqual(len(evaluate.calls), 4)
+
+    def test_store_paths_are_cached_per_pname(self):
+        from . import outdated
+
+        evaluate = self._fake_evaluate()
+        pin = "/nix/store/aaa-source"
+        paths = outdated.verify_store_paths(self.conn, pin, "x86_64-linux", ["boost", "dbus"])
+        self.assertEqual(len(evaluate.calls), 1)
+        self.assertEqual(paths["/nix/store/boost189"]["attr"], "boost189")
+        self.assertEqual(evaluate.calls[0][1], True)  # asked for outputs
+        # Nothing left to evaluate the second time.
+        outdated.verify_store_paths(self.conn, pin, "x86_64-linux", ["boost"])
+        self.assertEqual(len(evaluate.calls), 1)
+        # A pname that was never evaluated is fetched on its own.
+        outdated.verify_store_paths(self.conn, pin, "x86_64-linux", ["gtk+3"])
+        self.assertEqual(len(evaluate.calls), 2)
+
+    def test_batches_and_filter(self):
+        from . import outdated
+
+        names = [f"pkg{index}" for index in range(5)]
+        self.assertEqual(outdated.batches(names, size=2), [names[0:2], names[2:4], names[4:]])
+        self.assertEqual(outdated.batches([], size=2), [])
+        self.assertEqual(
+            outdated.filter_regex(["a+b", "c.d", "x-y"]),
+            "^(a\\+b|c\\.d|x-y)$",  # "-" must stay literal, nix rejects \\-
+        )
+
+    def test_build_reports_and_verifies(self):
+        from . import outdated
+
+        pin = "/nix/store/aaa-source"
+        snapshot_id = self.seed(
+            [
+                ("boost", "1.89.0", "boost-1.89.0", "/nix/store/boost189"),
+                ("dbus", "1", "dbus-1", "/nix/store/makeDBusConf"),
+                ("gtk+3", "3.24.52", "gtk+3-3.24.52", "/nix/store/gtk3"),
+                ("X-Restart-Triggers-polkit", None, "X-Restart-Triggers-polkit", "/nix/store/t"),
+            ]
+        )
+        self._fake_evaluate()
+
+        plain = outdated.build(self.conn, snapshot_id, pin, system="x86_64-linux")
+        self.assertEqual(plain["counts"], {outdated.CURRENT: 1, outdated.OUTDATED: 2, outdated.AHEAD: 0, outdated.UNMAPPED: 1})
+        self.assertFalse(plain["nixpkgs"]["verified"])
+        self.assertIn("--verify-store-paths", outdated.format_text(plain))
+        json.loads(outdated.format_json(plain))  # must be serialisable
+
+        verified = outdated.build(
+            self.conn, snapshot_id, pin, system="x86_64-linux", verify=True
+        )
+        self.assertEqual(verified["counts"][outdated.OUTDATED], 0)
+        self.assertEqual(verified["counts"][outdated.CURRENT], 3)
+        self.assertEqual(verified["nixpkgs"]["resolved_candidates"], 2)
+        self.assertIn("store-path check", outdated.format_text(verified))
+
+    def test_build_rejects_a_missing_snapshot(self):
+        from . import outdated
+
+        self._fake_evaluate()
+        with self.assertRaises(SystemExit):
+            outdated.build(self.conn, 99, "/nix/store/aaa-source", system="x86_64-linux")
+
+
 class CliTest(unittest.TestCase):
     def test_run_parser_provides_every_option_cmd_run_touches(self):
         from . import cli
@@ -596,6 +866,25 @@ class CliTest(unittest.TestCase):
             "db",
         ):
             self.assertTrue(hasattr(args, attribute), attribute)
+
+    def test_outdated_parser_provides_every_option_cmd_outdated_touches(self):
+        from . import cli
+
+        args = cli.build_parser().parse_args(["outdated", "--verify-store-paths"])
+        for attribute in (
+            "nixpkgs",
+            "system",
+            "snapshot",
+            "refresh",
+            "verify_store_paths",
+            "json",
+            "limit",
+            "fail_on_outdated",
+            "db",
+        ):
+            self.assertTrue(hasattr(args, attribute), attribute)
+        self.assertTrue(args.verify_store_paths)
+        self.assertFalse(args.fail_on_outdated)
 
     def test_exit_codes_leave_one_free_for_crashes(self):
         self.assertEqual(report.CLEAN, 0)
