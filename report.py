@@ -174,7 +174,7 @@ def dedupe(advisories: list[dict]) -> list[dict]:
 
 def build(connection, snapshot_id: int, whitelist_paths=()) -> dict:
     """Assemble the report data for one snapshot."""
-    from . import db
+    from . import db, outdated
 
     snapshot = connection.execute(
         "SELECT id, taken_at FROM snapshots WHERE id = ?", (snapshot_id,)
@@ -281,6 +281,11 @@ def build(connection, snapshot_id: int, whitelist_paths=()) -> dict:
         "current": sorted(current.values(), key=lambda e: (e["name"], e["version"] or "")),
         "masked": sorted(masked.values(), key=lambda e: (e["name"], e["version"] or "")),
         "fixed": fixed,
+        # The last nixpkgs comparison for this snapshot, or None when the version
+        # check has not run since the snapshot was taken. Deliberately not
+        # recomputed here: `report` is a database read (the bar widget runs it
+        # every minute), and the comparison costs an evaluation.
+        "outdated": outdated.stored(connection, snapshot_id),
     }
 
 
@@ -301,18 +306,38 @@ def _format_advisory(advisory: dict) -> str:
     return "  ".join(bits)
 
 
+def _drift_summary(drift: dict | None) -> str:
+    """The version sentence appended to the header, or nothing."""
+    if not drift:
+        return ""
+    counts = drift.get("counts") or {}
+    newer = counts.get("outdated", 0)
+    ahead = counts.get("ahead", 0)
+    bits = []
+    if newer:
+        bits.append(f"{newer} newer in nixpkgs")
+    if ahead:
+        bits.append(f"{ahead} newer than the pin")
+    return ", " + ", ".join(bits) if bits else ""
+
+
 def format_text(report: dict, limit: int = 20, show_masked: bool = False) -> str:
     lines: list[str] = []
     active = report["current"]
     snapshot = report["snapshot"]
 
     if not active and not report["masked"] and not report["fixed"]:
-        return f"Snapshot #{snapshot['id']}: found no advisories."
+        return (
+            f"Snapshot #{snapshot['id']}: found no advisories"
+            + _drift_summary(report.get("outdated"))
+            + "."
+        )
 
     lines.append(
         f"Snapshot #{snapshot['id']} ({snapshot['taken_at']}): "
         f"{len(active)} affected packages, {len(report['fixed'])} fixed since "
         f"{'snapshot #' + str(report['previous']['id']) if report['previous'] else 'ever'}"
+        + _drift_summary(report.get("outdated"))
     )
 
     buckets = (

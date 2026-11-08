@@ -593,3 +593,54 @@ def _describe(row: dict, arrow: str) -> str:
 
 def format_json(report: dict) -> str:
     return json.dumps(report, indent=1, sort_keys=False)
+
+
+def record(connection, snapshot_id: int, report: dict) -> None:
+    """Remember a comparison so `report` can show it without an evaluation.
+
+    `outdated` costs a nixpkgs evaluation; `report` runs every minute for the bar
+    widget and must stay a database read. Storing the result here is what makes
+    the drift count available to the widget at all.
+    """
+    connection.execute(
+        "INSERT INTO outdated_summary"
+        " (snapshot_id, pin, verified, counts, outdated, ahead)"
+        " VALUES (?, ?, ?, ?, ?, ?)"
+        " ON CONFLICT (snapshot_id) DO UPDATE SET"
+        " taken_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),"
+        " pin = excluded.pin, verified = excluded.verified,"
+        " counts = excluded.counts, outdated = excluded.outdated,"
+        " ahead = excluded.ahead",
+        (
+            snapshot_id,
+            report["nixpkgs"]["pin"],
+            1 if report["nixpkgs"]["verified"] else 0,
+            json.dumps(report["counts"]),
+            json.dumps(report["outdated"]),
+            json.dumps(report["ahead"]),
+        ),
+    )
+    connection.commit()
+
+
+def stored(connection, snapshot_id: int) -> dict | None:
+    """The comparison recorded for this snapshot, if any.
+
+    None means "not computed for this snapshot" - deliberately not "no drift".
+    A stale row from an older snapshot is not reused: the installed versions
+    have changed since, so the answer would be for a different system.
+    """
+    row = connection.execute(
+        "SELECT * FROM outdated_summary WHERE snapshot_id = ?", (snapshot_id,)
+    ).fetchone()
+    if row is None:
+        return None
+    return {
+        "snapshot_id": row["snapshot_id"],
+        "taken_at": row["taken_at"],
+        "pin": row["pin"],
+        "verified": bool(row["verified"]),
+        "counts": json.loads(row["counts"]),
+        "outdated": json.loads(row["outdated"]),
+        "ahead": json.loads(row["ahead"]),
+    }

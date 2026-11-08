@@ -11,7 +11,7 @@ import os
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS vuln_meta (
@@ -120,6 +120,19 @@ CREATE TABLE IF NOT EXISTS nixpkgs_outputs (
     pname  TEXT NOT NULL,
     attrs  TEXT NOT NULL,   -- JSON: {attr: {output: store path}}
     PRIMARY KEY (pin, system, pname)
+);
+
+-- The last nixpkgs comparison, remembered so `report` - and through it the
+-- Noctalia widget - can show version drift without evaluating nixpkgs. Keyed
+-- by snapshot: a new snapshot invalidates it until the next `run` refreshes it.
+CREATE TABLE IF NOT EXISTS outdated_summary (
+    snapshot_id INTEGER PRIMARY KEY,
+    taken_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    pin         TEXT NOT NULL,
+    verified    INTEGER NOT NULL DEFAULT 0,
+    counts      TEXT NOT NULL,                -- JSON: {current, outdated, ahead, unmapped}
+    outdated    TEXT NOT NULL DEFAULT '[]',   -- JSON: [{name, version, nixpkgs_version, attr, ...}]
+    ahead       TEXT NOT NULL DEFAULT '[]'
 );
 """
 

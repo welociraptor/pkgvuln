@@ -193,6 +193,9 @@ def cmd_outdated(args: argparse.Namespace) -> int:
             )
         except outdated.EvaluationError as error:
             raise SystemExit(f"error: {error}") from error
+        # Also stored, so `pkgvuln report` (and the widget reading it) shows the
+        # same numbers until the next snapshot.
+        outdated.record(connection, snapshot["id"], data)
         if args.json:
             print(outdated.format_json(data))
         else:
@@ -227,6 +230,9 @@ def _report_outdated(connection, args: argparse.Namespace) -> None:
     except (outdated.EvaluationError, OSError) as error:
         logging.warning("nixpkgs version source skipped: %s", error)
         return
+    # Stored so the report (and the widget that reads it) can show the count
+    # without repeating the evaluation.
+    outdated.record(connection, snapshot["id"], data)
     print(outdated.format_text(data, limit=getattr(args, "limit", 20)))
     print()
 

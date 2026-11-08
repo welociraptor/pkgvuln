@@ -152,6 +152,31 @@ class VariantStripTest(unittest.TestCase):
         self.assertIsNone(nixver.strip_variants(""))
 
 
+def drift_payload(outdated=2, ahead=1, verified=True):
+    """What `outdated.build` returns, as far as the report cares about it."""
+    return {
+        "nixpkgs": {
+            "pin": "/nix/store/aaa-source",
+            "system": "x86_64-linux",
+            "attrs": 3,
+            "verified": verified,
+            "resolved_candidates": 0,
+        },
+        "counts": {"current": 5, "outdated": outdated, "ahead": ahead, "unmapped": 4},
+        "outdated": [
+            {
+                "name": "boost",
+                "version": "1.89.0",
+                "nixpkgs_version": "1.91.0",
+                "attr": "boost",
+                "confidence": "certain",
+                "store_path": "/nix/store/aaa-boost",
+            }
+        ],
+        "ahead": [],
+    }
+
+
 class DatabaseTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -365,6 +390,32 @@ class ReportTest(DatabaseTest):
         data = report.build(self.conn, snapshot_id, [])
         self.assertIsInstance(json.loads(report.format_json(data)), dict)
         self.assertIsInstance(report.format_text(data), str)
+
+    def test_drift_count_reaches_the_report(self):
+        """The widget reads `outdated.counts.outdated` from `report --json`."""
+        from . import outdated
+
+        snapshot_id = self.seed([("curl", "1.0", "curl-1.0", "/nix/store/a-curl-1.0")])
+        self.assertIsNone(report.build(self.conn, snapshot_id, [])["outdated"])
+
+        outdated.record(self.conn, snapshot_id, drift_payload())
+        data = report.build(self.conn, snapshot_id, [])
+        self.assertEqual(data["outdated"]["counts"]["outdated"], 2)
+        self.assertEqual(data["outdated"]["counts"]["ahead"], 1)
+        # The machine-readable shape the Luau side indexes into.
+        self.assertIsInstance(data["outdated"]["counts"], dict)
+        self.assertIn("2 newer in nixpkgs", report.format_text(data))
+        self.assertIn("newer than the pin", report.format_text(data))
+        self.assertIsInstance(json.loads(report.format_json(data))["outdated"]["counts"], dict)
+
+    def test_a_clean_snapshot_still_reports_drift(self):
+        from . import outdated
+
+        snapshot_id = self.seed([("curl", "1.0", "curl-1.0", "/nix/store/a-curl-1.0")])
+        outdated.record(self.conn, snapshot_id, drift_payload())
+        text = report.format_text(report.build(self.conn, snapshot_id, []))
+        self.assertIn("found no advisories", text)
+        self.assertIn("2 newer in nixpkgs", text)
 
 
 class NvdParseTest(unittest.TestCase):
@@ -764,6 +815,28 @@ class OutdatedTest(DatabaseTest):
         self.assertEqual(by_name["db"]["status"], outdated.OUTDATED)
         self.assertFalse(by_name["db"]["in_pin"])
         self.assertNotIn("verified_output", by_name["db"])
+
+    def test_summary_round_trip(self):
+        from . import outdated
+
+        snapshot_id = self.seed(
+            [("boost", "1.89.0", "boost-1.89.0", "/nix/store/aaa-boost")]
+        )
+        self.assertIsNone(outdated.stored(self.conn, snapshot_id))
+        outdated.record(self.conn, snapshot_id, drift_payload())
+        stored = outdated.stored(self.conn, snapshot_id)
+        self.assertEqual(stored["counts"]["outdated"], 2)
+        self.assertEqual(stored["pin"], "/nix/store/aaa-source")
+        self.assertTrue(stored["verified"])
+        self.assertEqual(stored["outdated"][0]["attr"], "boost")
+
+        # Re-running replaces rather than duplicating, and refreshes the counts.
+        outdated.record(self.conn, snapshot_id, drift_payload(outdated=0, ahead=0))
+        rows = list(self.conn.execute("SELECT snapshot_id FROM outdated_summary"))
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(outdated.stored(self.conn, snapshot_id)["counts"]["outdated"], 0)
+        # A different snapshot has not been compared: None, not "no drift".
+        self.assertIsNone(outdated.stored(self.conn, snapshot_id + 1))
 
     def test_attributes_are_cached_per_pin(self):
         from . import outdated
