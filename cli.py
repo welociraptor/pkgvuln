@@ -3,8 +3,8 @@
     pkgvuln sync     refresh KEV, EPSS (and NVD with --nvd)
     pkgvuln scan     run the matchers against the newest snapshot
     pkgvuln report   print the delta report
-    pkgvuln run      refresh NVD, scan, enrich, report - for the systemd timer
-    pkgvuln outdated compare the snapshot with the versions nixpkgs pins
+    pkgvuln run      refresh NVD, scan, enrich, report, version drift - the timer
+    pkgvuln outdated compare the snapshot with the versions nixpkgs pins (alone)
 
 Exit codes: 0 clean, 2 un-whitelisted findings, 3 only whitelisted findings.
 ``outdated`` exits 0 as well unless ``--fail-on-outdated`` is given; "an upgrade
@@ -204,6 +204,33 @@ def cmd_outdated(args: argparse.Namespace) -> int:
         connection.close()
 
 
+def _report_outdated(connection, args: argparse.Namespace) -> None:
+    """The nixpkgs version section of ``run``: informational, never fatal.
+
+    Unlike the advisory sources this needs no network and no feed data, but it
+    does need an evaluated nixpkgs, which can fail (no ``--nixpkgs``, evaluation
+    error, timeout). None of that may cost the vulnerability scan, so it is
+    caught and reported the same way a skipped feed is.
+    """
+    if getattr(args, "no_outdated", False):
+        return
+    try:
+        snapshot = _resolve_snapshot(connection, getattr(args, "snapshot", None))
+        data = outdated.build(
+            connection,
+            snapshot["id"],
+            outdated.resolve_pin(getattr(args, "nixpkgs", None)),
+            system=getattr(args, "system", None),
+            refresh=getattr(args, "refresh", False),
+            verify=getattr(args, "verify_store_paths", False),
+        )
+    except (outdated.EvaluationError, OSError) as error:
+        logging.warning("nixpkgs version source skipped: %s", error)
+        return
+    print(outdated.format_text(data, limit=getattr(args, "limit", 20)))
+    print()
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     connection = db.connect(args.db)
     try:
@@ -218,6 +245,9 @@ def cmd_run(args: argparse.Namespace) -> int:
         _scan(connection, args)
         _sync_enrichment(connection)
         connection.commit()
+        # Version drift first, the advisory report last: the report is the one
+        # with the exit code and the findings that matter.
+        _report_outdated(connection, args)
         return _report(connection, args)
     finally:
         connection.close()
@@ -277,6 +307,28 @@ def build_parser() -> argparse.ArgumentParser:
         sub.add_argument("--years", type=int, default=nvd.YEARS, help=argparse.SUPPRESS)
         sub.add_argument("--archives", nargs="+", help="explicit NVD archive names")
 
+    def add_outdated_options(sub: argparse.ArgumentParser) -> None:
+        sub.add_argument(
+            "--nixpkgs",
+            metavar="PATH",
+            help="nixpkgs source to compare against (default: $PKGVULN_NIXPKGS, else"
+            " the flake in the current directory)",
+        )
+        sub.add_argument(
+            "--system", help="Nix system to evaluate for (default: current system)"
+        )
+        sub.add_argument(
+            "--refresh",
+            action="store_true",
+            help="re-evaluate nixpkgs even if this pin is cached",
+        )
+        sub.add_argument(
+            "--verify-store-paths",
+            action="store_true",
+            help="check candidates against the pin's outputs, so an alternate"
+            " version line is not reported as outdated",
+        )
+
     sync_parser = subparsers.add_parser("sync", help="refresh advisory feeds")
     add_common(sync_parser)
     add_nvd_options(sync_parser)
@@ -298,6 +350,12 @@ def build_parser() -> argparse.ArgumentParser:
     add_scan_options(run_parser)
     add_report_options(run_parser)
     add_nvd_options(run_parser)
+    add_outdated_options(run_parser)
+    run_parser.add_argument(
+        "--no-outdated",
+        action="store_true",
+        help="skip the nixpkgs version comparison",
+    )
     run_parser.set_defaults(func=cmd_run, nvd=False, archives=None)
 
     outdated_parser = subparsers.add_parser(
@@ -307,26 +365,7 @@ def build_parser() -> argparse.ArgumentParser:
     outdated_parser.add_argument(
         "--snapshot", type=int, help="snapshot id (default: newest)"
     )
-    outdated_parser.add_argument(
-        "--nixpkgs",
-        metavar="PATH",
-        help="nixpkgs source to compare against (default: $PKGVULN_NIXPKGS, else"
-        " the flake in the current directory)",
-    )
-    outdated_parser.add_argument(
-        "--system", help="Nix system to evaluate for (default: current system)"
-    )
-    outdated_parser.add_argument(
-        "--refresh",
-        action="store_true",
-        help="re-evaluate nixpkgs even if this pin is cached",
-    )
-    outdated_parser.add_argument(
-        "--verify-store-paths",
-        action="store_true",
-        help="check candidates against the pin's outputs, so an alternate version"
-        " line is not reported as outdated",
-    )
+    add_outdated_options(outdated_parser)
     outdated_parser.add_argument("--json", action="store_true", help="machine readable output")
     outdated_parser.add_argument(
         "--limit", type=int, default=20, help="entries per section (default: %(default)s)"

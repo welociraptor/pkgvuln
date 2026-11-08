@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import contextlib
 import datetime
+import io
 import json
 import tempfile
 import unittest
@@ -843,6 +845,101 @@ class OutdatedTest(DatabaseTest):
             outdated.build(self.conn, 99, "/nix/store/aaa-source", system="x86_64-linux")
 
 
+class RunOutdatedTest(DatabaseTest):
+    """`run` carries the version check, and must survive it failing."""
+
+    def _args(self, **overrides):
+        from . import cli
+
+        args = cli.build_parser().parse_args(["run"])
+        for key, value in overrides.items():
+            setattr(args, key, value)
+        return args
+
+    def test_broken_nixpkgs_does_not_break_the_scan(self):
+        from . import cli, outdated
+
+        self.seed([("curl", "8.22.0", "curl-8.22.0", "/nix/store/aaa-curl")])
+
+        def broken(*_args, **_kwargs):
+            raise outdated.EvaluationError("no nixpkgs here")
+
+        original = outdated.build
+        outdated.build = broken
+        self.addCleanup(setattr, outdated, "build", original)
+
+        captured = io.StringIO()
+        with self.assertLogs(level="WARNING") as logs, contextlib.redirect_stdout(captured):
+            cli._report_outdated(self.conn, self._args(nixpkgs="/nix/store/nope"))
+        self.assertIn("nixpkgs version source skipped", logs.output[0])
+        # Skipped, not raised: the run continues to the advisory report.
+        self.assertEqual(captured.getvalue(), "")
+
+    def test_no_outdated_skips_the_comparison(self):
+        from . import cli, outdated
+
+        self.seed([("curl", "8.22.0", "curl-8.22.0", "/nix/store/aaa-curl")])
+
+        def must_not_run(*_args, **_kwargs):
+            raise AssertionError("outdated was evaluated despite --no-outdated")
+
+        original = outdated.build
+        outdated.build = must_not_run
+        self.addCleanup(setattr, outdated, "build", original)
+        cli._report_outdated(self.conn, self._args(no_outdated=True))
+
+    def test_section_is_printed_with_the_advisory_report(self):
+        from . import cli, outdated
+
+        self.seed([("boost", "1.89.0", "boost-1.89.0", "/nix/store/aaa-boost")])
+        args = self._args(nixpkgs="/nix/store/aaa-source", verify_store_paths=True)
+
+        def fake_build(connection, snapshot_id, pin, **kwargs):
+            return {
+                "snapshot": {"id": snapshot_id, "taken_at": "now"},
+                "nixpkgs": {
+                    "pin": str(pin),
+                    "system": "x86_64-linux",
+                    "attrs": 1,
+                    "verified": kwargs.get("verify", False),
+                    "resolved_candidates": 0,
+                },
+                "packages": 1,
+                "counts": {
+                    outdated.CURRENT: 0,
+                    outdated.OUTDATED: 1,
+                    outdated.AHEAD: 0,
+                    outdated.UNMAPPED: 0,
+                },
+                "outdated": [
+                    {
+                        "name": "boost",
+                        "version": "1.89.0",
+                        "store_path": "/nix/store/aaa-boost",
+                        "attr": "boost",
+                        "how": "default",
+                        "nixpkgs_version": "1.91.0",
+                        "status": outdated.OUTDATED,
+                        "confidence": "certain",
+                        "in_pin": False,
+                    }
+                ],
+                "ahead": [],
+            }
+
+        original = outdated.build
+        outdated.build = fake_build
+        self.addCleanup(setattr, outdated, "build", original)
+
+        captured = io.StringIO()
+        with contextlib.redirect_stdout(captured):
+            cli._report_outdated(self.conn, args)
+        text = captured.getvalue()
+        self.assertIn("1.89.0 -> 1.91.0", text)
+        self.assertIn("not built by this pin", text)
+        self.assertTrue(text.endswith("\n\n"), "the report follows on a new paragraph")
+
+
 class CliTest(unittest.TestCase):
     def test_run_parser_provides_every_option_cmd_run_touches(self):
         from . import cli
@@ -864,8 +961,19 @@ class CliTest(unittest.TestCase):
             "show_whitelisted",
             "limit",
             "db",
+            "nixpkgs",
+            "system",
+            "refresh",
+            "verify_store_paths",
+            "no_outdated",
         ):
             self.assertTrue(hasattr(args, attribute), attribute)
+
+    def test_run_does_the_outdated_check_by_default(self):
+        from . import cli
+
+        self.assertFalse(cli.build_parser().parse_args(["run"]).no_outdated)
+        self.assertTrue(cli.build_parser().parse_args(["run", "--no-outdated"]).no_outdated)
 
     def test_outdated_parser_provides_every_option_cmd_outdated_touches(self):
         from . import cli
