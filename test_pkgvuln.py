@@ -739,21 +739,45 @@ class OutdatedTest(DatabaseTest):
         from . import outdated
 
         packages = [
-            {"name": "boost", "version": "1.89.0", "store_path": "/nix/store/boost189"},
+            {"name": "boost", "version": "1.85.0", "store_path": "/nix/store/boost185"},
+            {"name": "db", "version": "4.8.30", "store_path": "/nix/store/db4"},
             {"name": "dbus", "version": "1", "store_path": "/nix/store/dbus-1"},
             {"name": "gtk+3", "version": "3.24.52", "store_path": "/nix/store/gtk3"},
             {"name": "coreutils-full", "version": "9.12_fish-completions", "store_path": "/nix/store/coreutils"},
             {"name": "X-Restart-Triggers-polkit", "version": None, "store_path": "/nix/store/triggers"},
         ]
         rows = {row["name"]: row for row in outdated.compare_packages(packages, self.ATTRS)}
+
+        # No sibling attribute has 1.85.0, so this really is behind pkgs.boost.
         self.assertEqual(rows["boost"]["status"], outdated.OUTDATED)
         self.assertEqual(rows["boost"]["attr"], "boost")
         self.assertEqual(rows["boost"]["confidence"], "certain")
-        self.assertEqual(rows["dbus"]["status"], outdated.OUTDATED)
+
+        # Kept version lines: the installed row is that line, not a stale default.
+        self.assertEqual(rows["db"]["status"], outdated.CURRENT)
+        self.assertEqual(rows["db"]["same_version_as"], "db4")
+        self.assertEqual(rows["dbus"]["status"], outdated.CURRENT)
+        self.assertEqual(rows["dbus"]["same_version_as"], "makeDBusConf")
+
         self.assertEqual(rows["gtk+3"]["status"], outdated.CURRENT)
         self.assertEqual(rows["gtk+3"]["attr"], "gtk3")
         self.assertEqual(rows["coreutils-full"]["status"], outdated.CURRENT)
         self.assertEqual(rows["X-Restart-Triggers-polkit"]["status"], outdated.UNMAPPED)
+
+    def test_a_kept_version_line_is_not_an_upgrade(self):
+        """`openssl_1_1` next to `openssl` means both are current on purpose."""
+        from . import outdated
+
+        attrs = {
+            "openssl": {"pname": "openssl", "version": "4.1.0"},
+            "openssl_1_1": {"pname": "openssl", "version": "1.1.1w"},
+        }
+        top = outdated.top_level(attrs)
+        index = outdated.index_by_pname(top)
+        self.assertEqual(
+            outdated.same_version_attr("openssl", "1.1.1w", top, index), "openssl_1_1"
+        )
+        self.assertIsNone(outdated.same_version_attr("openssl", "1.0.2", top, index))
 
     def test_unstable_versions_are_reported_as_unsure(self):
         from . import outdated
@@ -791,30 +815,38 @@ class OutdatedTest(DatabaseTest):
             }
         ))
 
-    def test_store_path_verification_drops_alternate_lines(self):
+    def test_store_path_verification_settles_an_unmatchable_version(self):
+        """A path the pin builds is current even when the version string cannot
+        be matched to any attribute's version (an unstable snapshot of it)."""
         from . import outdated
 
         packages = [
-            {"name": "boost", "version": "1.89.0", "store_path": "/nix/store/boost189"},
-            {"name": "dbus", "version": "1", "store_path": "/nix/store/makeDBusConf"},
-            {"name": "db", "version": "4.7.0", "store_path": "/nix/store/old-db"},
+            {
+                "name": "boost",
+                "version": "1.89.0-unstable-2021-05-09",
+                "store_path": "/nix/store/boost189",
+            },
+            {"name": "boost", "version": "1.85.0", "store_path": "/nix/store/old-boost"},
+            {"name": "gtk+3", "version": "3.24.52", "store_path": "/nix/store/gtk3"},
         ]
         rows = outdated.compare_packages(packages, self.ATTRS)
-        paths = {
-            "/nix/store/boost189": {"attr": "boost189", "output": "out"},
-            "/nix/store/makeDBusConf": {"attr": "makeDBusConf", "output": "out"},
-        }
-        outdated.apply_verification(rows, paths)
-        by_name = {row["name"]: row for row in rows}
-        self.assertEqual(by_name["boost"]["status"], outdated.CURRENT)
-        self.assertEqual(by_name["boost"]["attr"], "boost189")
-        self.assertEqual(by_name["boost"]["verified_output"], "out")
-        self.assertTrue(by_name["boost"]["in_pin"])
-        self.assertEqual(by_name["dbus"]["status"], outdated.CURRENT)
+        paths = {"/nix/store/boost189": {"attr": "boost189", "output": "out"}}
+        outdated.apply_verification(rows, paths, {"boost"})
+
+        verified, drifted, untouched = rows
+        self.assertEqual(verified["status"], outdated.CURRENT)
+        self.assertEqual(verified["attr"], "boost189")
+        self.assertEqual(verified["verified_output"], "out")
+        self.assertTrue(verified["in_pin"])
+        self.assertEqual(verified["note"], "identical to the pin")
+
         # Not in the pin: real drift, and it must stay visible.
-        self.assertEqual(by_name["db"]["status"], outdated.OUTDATED)
-        self.assertFalse(by_name["db"]["in_pin"])
-        self.assertNotIn("verified_output", by_name["db"])
+        self.assertEqual(drifted["status"], outdated.OUTDATED)
+        self.assertFalse(drifted["in_pin"])
+        self.assertNotIn("verified_output", drifted)
+
+        # A row whose pname was never evaluated makes no claim either way.
+        self.assertNotIn("in_pin", untouched)
 
     def test_summary_round_trip(self):
         from . import outdated
@@ -888,8 +920,10 @@ class OutdatedTest(DatabaseTest):
         pin = "/nix/store/aaa-source"
         snapshot_id = self.seed(
             [
-                ("boost", "1.89.0", "boost-1.89.0", "/nix/store/boost189"),
-                ("dbus", "1", "dbus-1", "/nix/store/makeDBusConf"),
+                # 1.85.0 has no sibling attribute: layer 1 can only say "behind".
+                ("boost", "1.85.0", "boost-1.85.0", "/nix/store/old-boost"),
+                # A kept version line, resolved by exact version.
+                ("db", "4.8.30", "db-4.8.30", "/nix/store/db4"),
                 ("gtk+3", "3.24.52", "gtk+3-3.24.52", "/nix/store/gtk3"),
                 ("X-Restart-Triggers-polkit", None, "X-Restart-Triggers-polkit", "/nix/store/t"),
             ]
@@ -897,7 +931,10 @@ class OutdatedTest(DatabaseTest):
         self._fake_evaluate()
 
         plain = outdated.build(self.conn, snapshot_id, pin, system="x86_64-linux")
-        self.assertEqual(plain["counts"], {outdated.CURRENT: 1, outdated.OUTDATED: 2, outdated.AHEAD: 0, outdated.UNMAPPED: 1})
+        self.assertEqual(
+            plain["counts"],
+            {outdated.CURRENT: 2, outdated.OUTDATED: 1, outdated.AHEAD: 0, outdated.UNMAPPED: 1},
+        )
         self.assertFalse(plain["nixpkgs"]["verified"])
         self.assertIn("--verify-store-paths", outdated.format_text(plain))
         json.loads(outdated.format_json(plain))  # must be serialisable
@@ -905,9 +942,13 @@ class OutdatedTest(DatabaseTest):
         verified = outdated.build(
             self.conn, snapshot_id, pin, system="x86_64-linux", verify=True
         )
-        self.assertEqual(verified["counts"][outdated.OUTDATED], 0)
-        self.assertEqual(verified["counts"][outdated.CURRENT], 3)
-        self.assertEqual(verified["nixpkgs"]["resolved_candidates"], 2)
+        # old-boost is not a path this pin builds, so it stays a candidate and is
+        # marked as such; only the candidates are looked up at all.
+        self.assertEqual(verified["counts"][outdated.OUTDATED], 1)
+        self.assertEqual(verified["nixpkgs"]["resolved_candidates"], 0)
+        drifted = verified["outdated"][0]
+        self.assertFalse(drifted["in_pin"])
+        self.assertNotIn("in_pin", verified["ahead"])
         self.assertIn("store-path check", outdated.format_text(verified))
 
     def test_build_rejects_a_missing_snapshot(self):

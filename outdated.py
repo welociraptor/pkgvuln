@@ -4,10 +4,9 @@ Two layers, because the cheap one is not trustworthy on its own.
 
 **Layer 1** evaluates nixpkgs once per pin (``nix-env -qa --json``: 104 900
 attributes, ~75 s and 26 MB on this machine) and compares every installed
-package with ``pkgs.<pname>``. Measured against the live database, that resolves
-~620 of 1108 rows and produces five "newer version available" candidates - all
-five false. The reason is that a *pname is not an attribute path* and a version
-is not enough to tell an old package from another version line:
+package with ``pkgs.<pname>``. On its own that produced five "newer version
+available" candidates on this machine, all five false, because a *pname is not
+an attribute path* and a version is not an identity:
 
 * ``boost 1.89.0`` is ``pkgs.boost189`` (still in the pin, and 1.89 is what the
   closure asks for), while ``pkgs.boost`` is 1.91 and nothing installs it;
@@ -17,19 +16,25 @@ is not enough to tell an old package from another version line:
   "1" as a version;
 * ``lua 5.4.9`` is ``pkgs.lua5_4_compat`` and 5.5.1 is installed too.
 
-**Layer 2** (``--verify-store-paths``) settles it by store path instead of by
-name: the same attributes are evaluated with ``--out-path``, and the snapshot's
-``store_path`` is looked up in the result. A hit proves the installed path is
-exactly what this pin builds, whatever it is called, so the candidate is
-dropped. Only a miss is real: a package from an older pin (``nix profile``), an
+All four are settled by :func:`same_version_attr`: when a sibling attribute
+with the same pname carries exactly the installed version, the package is on
+that *deliberate* line. nixpkgs keeping ``openssl_1_1`` next to ``openssl`` is
+an explicit statement that both are current, so "you are on 1.1" is not "you
+never upgraded to 4.1".
+
+**Layer 2** (``--verify-store-paths``) answers the remaining cases by store path
+instead of by name: the candidates' attributes are evaluated with ``--out-path``
+and the snapshot's ``store_path`` is looked up in the result. A hit proves the
+installed path is exactly what this pin builds, whatever it is called. A miss
+is the interesting case: a package from an older pin (``nix profile``), an
 output from another flake input, or an attribute that has since been renamed or
-removed.
+removed. That is what ``in_pin: false`` in the report means.
 
 What the report calls ``ahead`` is the mirror image - installed newer than the
 pin's default attribute. Usually that is a variant marker in the version
 (``9.12_fish-completions``, ``1.2.4-zstd``, ``5.42.3-env``; see
-:func:`pkgvuln.nixver.strip_variants`), occasionally a deliberate alternate
-line the profile picked up.
+:func:`pkgvuln.nixver.strip_variants`) or a deliberate newer line such as
+``boot.kernelPackages = pkgs.linuxPackages_latest``.
 
 Exit codes follow :mod:`pkgvuln.report`: 0 by default because "an upgrade
 exists" is not a failure, 2 with ``--fail-on-outdated`` when something is
@@ -424,6 +429,32 @@ def confident(version: str | None, reference: str | None) -> bool:
     )
 
 
+def same_version_attr(
+    name: str, version: str | None, top: dict[str, dict], index: dict[str, list[str]]
+) -> str | None:
+    """The sibling attribute of this pname whose version *is* the installed one.
+
+    nixpkgs keeps deliberate version lines side by side: ``boost189`` sits next
+    to ``boost``, ``db4`` next to ``db``, ``lua5_4_compat`` next to ``lua``,
+    ``openssl_1_1`` next to ``openssl``, and ``makeDBusConf`` (whose version is
+    the bare "1" that the name/version split produces) next to ``dbus``. When
+    one of them matches exactly, the installed package is that line - chosen on
+    purpose - and not an un-upgraded ``pkgs.<name>``.
+
+    This is the difference between "you are on the 1.1 line" and "you never
+    upgraded to 4.1": nixpkgs keeping the old version as a named attribute is an
+    explicit statement that both are current.
+    """
+    wanted = nixver.strip_variants(version)
+    if not wanted:
+        return None
+    for attr in index.get(name, []):
+        reference = nixver.strip_variants(top[attr]["version"])
+        if reference and nixver.compare(wanted, reference) == 0:
+            return attr
+    return None
+
+
 def compare_packages(packages, attrs: dict[str, dict]) -> list[dict]:
     """Layer 1: one row per installed package."""
     top = top_level(attrs)
@@ -446,13 +477,29 @@ def compare_packages(packages, attrs: dict[str, dict]) -> list[dict]:
         }
         if status in (OUTDATED, AHEAD):
             row["confidence"] = "certain" if confident(version, reference) else "unsure"
+            # A deliberate version line of the same package is not an upgrade.
+            sibling = same_version_attr(name, version, top, index)
+            if sibling is not None:
+                row["status"] = CURRENT
+                row["same_version_as"] = sibling
+                row["note"] = f"same version line as {sibling}"
+                row.pop("confidence")
         rows.append(row)
     return rows
 
 
-def apply_verification(rows: list[dict], paths: dict[str, dict]) -> None:
-    """Layer 2: a store path the pin builds cannot be out of date."""
+def apply_verification(
+    rows: list[dict], paths: dict[str, dict], pnames=frozenset()
+) -> None:
+    """Layer 2: a store path the pin builds cannot be out of date.
+
+    ``pnames`` is the set of package names the pin was actually asked about, so
+    ``in_pin`` only claims something for rows that were evaluated (the
+    candidates); for everything else the answer is unknown, not False.
+    """
     for row in rows:
+        if row["name"] not in pnames:
+            continue
         resolved = paths.get(row["store_path"])
         row["in_pin"] = resolved is not None
         if resolved is None:
@@ -501,7 +548,7 @@ def build(
         candidates = {row["name"] for row in rows if row["status"] in (OUTDATED, AHEAD)}
         if candidates:
             paths = verify_store_paths(connection, pin, system, candidates)
-        apply_verification(rows, paths)
+        apply_verification(rows, paths, candidates)
     counts = {status: 0 for status in (CURRENT, OUTDATED, AHEAD, UNMAPPED)}
     for row in rows:
         counts[row["status"]] += 1
